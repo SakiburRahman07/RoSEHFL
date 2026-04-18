@@ -1,0 +1,14 @@
+.venv
+.env
+*.py[cod]
+__pycache__/
+dataset/
+logs/
+partitions/
+checkpoints/
+metrics/
+*.md
+!README.md
+!LICENSE.md
+!CLAUDE.md
+.claude/

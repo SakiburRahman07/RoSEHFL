@@ -1,0 +1,21 @@
+# ShapeFL on Flower — Requirements
+# =================================
+# Install:  pip install -r requirements.txt
+
+# Core ML
+torch
+torchvision
+
+# Flower federated learning framework
+flwr[simulation]
+pulp
+
+# Numerical / data
+numpy
+pandas
+scipy
+opacus
+
+# Optional: visualisation
+matplotlib
+seaborn
