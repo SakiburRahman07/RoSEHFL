@@ -3,7 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
-from flwr.common import ndarrays_to_parameters
+from flwr.common import ndarrays_to_parameters, parameters_to_ndarrays
 
 from shapefl.strategy import RoSEHFLStrategy
 
@@ -374,6 +374,100 @@ class RoSEQ1SPlanningTests(unittest.TestCase):
         self.assertIn("current", candidates)
         self.assertEqual(candidates["current"]["baseline_reason"], "current_topology")
         self.assertEqual(candidates["current"]["planning_phase"], "late")
+
+    def test_commit_same_plan_preserves_edge_state(self):
+        strategy = _strategy()
+        strategy.selected_edges = {0, 1}
+        strategy.edge_nodes = {0: [0, 1, 2], 1: [3, 4, 5]}
+        strategy.edge_data_sizes = {0: 30, 1: 30}
+        strategy.node_edge = _edge_nodes_to_node_edge(strategy.edge_nodes)
+        strategy.edge_parameters = {
+            0: ndarrays_to_parameters([np.array([1.0], dtype=np.float32)]),
+            1: ndarrays_to_parameters([np.array([2.0], dtype=np.float32)]),
+        }
+        strategy.edge_anchor_weights = {
+            0: [np.array([1.5], dtype=np.float32)],
+            1: [np.array([2.5], dtype=np.float32)],
+        }
+        strategy.edge_swa_buffers = {
+            0: [[np.array([1.25], dtype=np.float32)]],
+            1: [[np.array([2.25], dtype=np.float32)]],
+        }
+        strategy.drift_bank.reset(strategy.selected_edges)
+        strategy.drift_bank.update(0, 0.5)
+
+        candidate = strategy._candidate_from_assignment(
+            selected_edges={0, 1},
+            edge_nodes={0: [0, 1, 2], 1: [3, 4, 5]},
+            edge_data_sizes={0: 30, 1: 30},
+            objective_value=1.0,
+            source="current",
+        )
+
+        commit_info = strategy._commit_plan_candidate(candidate)
+
+        self.assertFalse(commit_info["plan_changed"])
+        self.assertEqual(commit_info["reinitialized_edges"], [])
+        self.assertEqual(commit_info["preserved_edges"], [0, 1])
+        self.assertTrue(
+            np.allclose(
+                parameters_to_ndarrays(strategy.edge_parameters[0])[0],
+                np.array([1.0], dtype=np.float32),
+            )
+        )
+        self.assertEqual(len(strategy.edge_swa_buffers[0]), 1)
+        self.assertGreater(strategy.drift_bank.states[0].num_updates, 0)
+
+    def test_commit_partial_replan_preserves_unchanged_edges(self):
+        strategy = _strategy()
+        strategy.global_parameters = ndarrays_to_parameters([np.array([0.0], dtype=np.float32)])
+        strategy.selected_edges = {0, 1}
+        strategy.edge_nodes = {0: [0, 1, 2], 1: [3, 4, 5]}
+        strategy.edge_data_sizes = {0: 30, 1: 30}
+        strategy.node_edge = _edge_nodes_to_node_edge(strategy.edge_nodes)
+        strategy.edge_parameters = {
+            0: ndarrays_to_parameters([np.array([1.0], dtype=np.float32)]),
+            1: ndarrays_to_parameters([np.array([2.0], dtype=np.float32)]),
+        }
+        strategy.edge_anchor_weights = {
+            0: [np.array([1.5], dtype=np.float32)],
+            1: [np.array([2.5], dtype=np.float32)],
+        }
+        strategy.edge_swa_buffers = {
+            0: [[np.array([1.25], dtype=np.float32)]],
+            1: [[np.array([2.25], dtype=np.float32)]],
+        }
+        strategy.drift_bank.reset(strategy.selected_edges)
+        strategy.drift_bank.update(0, 0.5)
+        strategy.drift_bank.update(1, 0.7)
+
+        candidate = strategy._candidate_from_assignment(
+            selected_edges={0, 2},
+            edge_nodes={0: [0, 1, 2], 2: [3, 4, 5]},
+            edge_data_sizes={0: 30, 2: 30},
+            objective_value=1.0,
+            source="planner_0",
+        )
+
+        commit_info = strategy._commit_plan_candidate(candidate)
+
+        self.assertTrue(commit_info["plan_changed"])
+        self.assertEqual(commit_info["preserved_edges"], [0])
+        self.assertEqual(commit_info["reinitialized_edges"], [2])
+        self.assertTrue(
+            np.allclose(
+                parameters_to_ndarrays(strategy.edge_parameters[0])[0],
+                np.array([1.0], dtype=np.float32),
+            )
+        )
+        self.assertTrue(
+            np.allclose(
+                parameters_to_ndarrays(strategy.edge_parameters[2])[0],
+                np.array([0.0], dtype=np.float32),
+            )
+        )
+        self.assertGreater(strategy.drift_bank.states[0].num_updates, 0)
+        self.assertEqual(strategy.drift_bank.states[2].num_updates, 0)
 
     def test_delayed_compression_schedule(self):
         strategy = _strategy(

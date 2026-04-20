@@ -71,7 +71,7 @@ from .utils.compression import (
     scaled_cost_from_payload,
     zero_residuals_like,
 )
-from .utils.drift import PageHinkleyBank, weights_l2_distance
+from .utils.drift import PageHinkleyBank, PageHinkleyState, weights_l2_distance
 from .utils.json_utils import save_json
 from .utils.model_state import batch_norm_state_keys, head_state_keys, state_key_indices
 from .utils.network_topology import generate_topology
@@ -310,7 +310,8 @@ class ShapeFlStrategy(fl.server.strategy.Strategy):
         print(
             f"  Cloud Round {self.cloud_round}/{self.kappa} | "
             f"Acc: {weighted_acc:.4f} | Loss: {weighted_loss:.4f} | "
-            f"CumCost: {self.cumulative_cost_gb:.4f} GB"
+            f"PaperCost: {self.cumulative_cost_gb:.4f} GB | "
+            f"EffectiveCost: {self.effective_cumulative_cost_gb:.4f} GB"
         )
         return weighted_loss, {"accuracy": weighted_acc}
 
@@ -343,7 +344,8 @@ class ShapeFlStrategy(fl.server.strategy.Strategy):
         print(
             f"  Cloud Round {self.cloud_round}/{self.kappa} | "
             f"Acc: {accuracy:.4f} | Loss: {loss:.4f} | "
-            f"CumCost: {self.cumulative_cost_gb:.4f} GB"
+            f"PaperCost: {self.cumulative_cost_gb:.4f} GB | "
+            f"EffectiveCost: {self.effective_cumulative_cost_gb:.4f} GB"
         )
         return loss, metrics
 
@@ -1984,32 +1986,111 @@ class RoSEHFLStrategy(ShapeFlStrategy):
     def _commit_plan_candidate(
         self,
         candidate: Dict[str, object],
-    ) -> None:
-        self.selected_edges = {int(edge_id) for edge_id in candidate["selected_edges"]}
-        self.edge_nodes = {
+    ) -> Dict[str, object]:
+        previous_selected_edges = {int(edge_id) for edge_id in self.selected_edges}
+        previous_node_edge = {
+            int(node_id): int(edge_id)
+            for node_id, edge_id in self.node_edge.items()
+        }
+        previous_edge_nodes = {
+            int(edge_id): tuple(sorted(int(node_id) for node_id in nodes))
+            for edge_id, nodes in self.edge_nodes.items()
+        }
+        previous_drift_snapshot = self.drift_bank.snapshot()
+
+        new_selected_edges = {int(edge_id) for edge_id in candidate["selected_edges"]}
+        new_edge_nodes = {
             int(edge_id): [int(node_id) for node_id in nodes]
             for edge_id, nodes in candidate["edge_nodes"].items()
         }
-        self.edge_data_sizes = {
+        new_edge_data_sizes = {
             int(edge_id): int(size)
             for edge_id, size in candidate["edge_data_sizes"].items()
         }
-        self.node_edge = {
+        new_node_edge = {
             int(node_id): int(edge_id)
             for node_id, edge_id in candidate["node_edge"].items()
         }
+
+        self.selected_edges = new_selected_edges
+        self.edge_nodes = new_edge_nodes
+        self.edge_data_sizes = new_edge_data_sizes
+        self.node_edge = new_node_edge
         self._compute_per_round_cost()
+
+        same_plan = (
+            bool(previous_selected_edges)
+            and new_selected_edges == previous_selected_edges
+            and new_node_edge == previous_node_edge
+        )
+        if same_plan:
+            return {
+                "plan_changed": False,
+                "preserved_edges": sorted(int(edge_id) for edge_id in new_selected_edges),
+                "reinitialized_edges": [],
+            }
+
+        preserved_edges = {
+            int(edge_id)
+            for edge_id in new_selected_edges
+            if previous_edge_nodes.get(int(edge_id))
+            == tuple(sorted(int(node_id) for node_id in new_edge_nodes.get(int(edge_id), [])))
+            and int(edge_id) in self.edge_parameters
+        }
+        reinitialized_edges = sorted(int(edge_id) for edge_id in new_selected_edges - preserved_edges)
+
+        preserved_edge_parameters = {
+            int(edge_id): ndarrays_to_parameters(
+                self._weights_copy(parameters_to_ndarrays(self.edge_parameters[int(edge_id)]))
+            )
+            for edge_id in preserved_edges
+            if int(edge_id) in self.edge_parameters
+        }
+        preserved_anchor_weights = {
+            int(edge_id): self._weights_copy(self.edge_anchor_weights[int(edge_id)])
+            for edge_id in preserved_edges
+            if int(edge_id) in self.edge_anchor_weights
+        }
+        preserved_swa_buffers = {
+            int(edge_id): [
+                self._weights_copy(weights)
+                for weights in self.edge_swa_buffers.get(int(edge_id), [])
+            ]
+            for edge_id in preserved_edges
+        }
+
         global_weights = self._weights_copy(parameters_to_ndarrays(self.global_parameters))
         self.edge_parameters = {
-            int(edge_id): ndarrays_to_parameters(self._weights_copy(global_weights))
+            int(edge_id): preserved_edge_parameters.get(
+                int(edge_id),
+                ndarrays_to_parameters(self._weights_copy(global_weights)),
+            )
             for edge_id in self.selected_edges
         }
         self.edge_anchor_weights = {
-            int(edge_id): self._weights_copy(global_weights)
+            int(edge_id): preserved_anchor_weights.get(
+                int(edge_id),
+                self._weights_copy(global_weights),
+            )
             for edge_id in self.selected_edges
         }
-        self.edge_swa_buffers = {int(edge_id): [] for edge_id in self.selected_edges}
-        self.drift_bank.reset(self.selected_edges)
+        self.edge_swa_buffers = {
+            int(edge_id): preserved_swa_buffers.get(int(edge_id), [])
+            for edge_id in self.selected_edges
+        }
+        self.drift_bank.states = {
+            int(edge_id): (
+                PageHinkleyState.from_dict(previous_drift_snapshot[int(edge_id)])
+                if int(edge_id) in preserved_edges and int(edge_id) in previous_drift_snapshot
+                else PageHinkleyState()
+            )
+            for edge_id in self.selected_edges
+        }
+        return {
+            "plan_changed": True,
+            "preserved_edges": sorted(int(edge_id) for edge_id in preserved_edges),
+            "reinitialized_edges": reinitialized_edges,
+        }
 
     def _apply_los_result(self, los_result) -> None:
         self._commit_plan_candidate(
@@ -2617,6 +2698,11 @@ class RoSEHFLStrategy(ShapeFlStrategy):
             raise RuntimeError("RoSE planning produced no feasible topology candidate")
 
         chosen_candidate = None
+        commit_info = {
+            "plan_changed": False,
+            "preserved_edges": [],
+            "reinitialized_edges": [],
+        }
         if planning_objective_active == "effective":
             if self.model_factory is None or self.probe_loader is None:
                 raise RuntimeError("Effective planning requires probe_loader and model_factory")
@@ -2684,7 +2770,7 @@ class RoSEHFLStrategy(ShapeFlStrategy):
                 evaluated_candidates,
                 planning_round=planning_round,
             )
-            self._commit_plan_candidate(chosen_candidate)
+            commit_info = self._commit_plan_candidate(chosen_candidate)
             event["current_probe_accuracy"] = float(current_probe_accuracy)
             event["accuracy_guard_tolerance"] = float(self.accuracy_guard_tolerance)
             event["effective_accuracy_delta"] = float(self.effective_accuracy_delta)
@@ -2725,10 +2811,15 @@ class RoSEHFLStrategy(ShapeFlStrategy):
                 and candidate_cost > self.per_round_cost_gb * (1.0 + self.replan_cost_increase_tolerance)
             )
             if not cost_cap_triggered or not self.selected_edges:
-                self._commit_plan_candidate(candidate_plan)
+                commit_info = self._commit_plan_candidate(candidate_plan)
                 chosen_candidate = candidate_plan
             else:
                 chosen_candidate = self._current_plan_candidate()
+                commit_info = {
+                    "plan_changed": False,
+                    "preserved_edges": sorted(int(edge_id) for edge_id in self.selected_edges),
+                    "reinitialized_edges": [],
+                }
             event["objective_value"] = float(los_result.objective_value)
             event["cost_cap_triggered"] = bool(cost_cap_triggered)
             event["candidate_per_round_cost_gb"] = float(candidate_cost)
@@ -2762,6 +2853,13 @@ class RoSEHFLStrategy(ShapeFlStrategy):
         }
         if chosen_candidate is not None:
             event["selected_plan_source"] = str(chosen_candidate.get("source", ""))
+        event["plan_changed"] = bool(commit_info.get("plan_changed", False))
+        event["preserved_edges"] = [
+            int(edge_id) for edge_id in commit_info.get("preserved_edges", [])
+        ]
+        event["reinitialized_edges"] = [
+            int(edge_id) for edge_id in commit_info.get("reinitialized_edges", [])
+        ]
         self.shapley_history.append(event)
         self.plan_history.append(event)
 

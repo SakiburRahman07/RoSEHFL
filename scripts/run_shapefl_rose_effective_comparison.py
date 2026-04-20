@@ -367,12 +367,23 @@ def run_effective_comparison(args) -> dict:
         target_accuracy=args.target_accuracy,
         budget_gb=args.budget_gb,
     )
+    shapefl_final_accuracy = summary.get("shapefl", {}).get("final_accuracy")
+    if shapefl_final_accuracy is not None:
+        for strategy_name, result in all_results.items():
+            summary[strategy_name]["cost_to_shapefl_final_accuracy_gb"] = effective_cost_to_target(
+                result["metrics"],
+                float(shapefl_final_accuracy),
+            )
+    else:
+        for strategy_name in all_results:
+            summary[strategy_name]["cost_to_shapefl_final_accuracy_gb"] = None
 
     payload = {
         "config": vars(args),
         "strategies": strategy_names,
         "comparison_mode": "effective_only",
         "common_effective_budget_gb": common_budget,
+        "shapefl_final_accuracy": shapefl_final_accuracy,
         "summary": summary,
         "per_round_metrics": {name: result["metrics"] for name, result in all_results.items()},
     }
@@ -386,15 +397,30 @@ def run_effective_comparison(args) -> dict:
         final_accuracy = result["final_accuracy"]
         final_cost = result["final_effective_cumulative_cost_gb"]
         target_cost = result["effective_cost_to_target_gb"]
+        shapefl_target_cost = result["cost_to_shapefl_final_accuracy_gb"]
+        budget_accuracy = result["accuracy_at_common_effective_budget"]
+        model_payload = result["total_model_payload_bytes"]
+        probe_payload = result["total_probe_payload_bytes"]
         final_accuracy_str = "n/a" if final_accuracy is None else f"{float(final_accuracy):.4f}"
         final_cost_str = "n/a" if final_cost is None else f"{float(final_cost):.6f}"
         target_cost_str = "not_reached" if target_cost is None else f"{float(target_cost):.6f}"
+        shapefl_target_cost_str = (
+            "not_reached"
+            if shapefl_target_cost is None
+            else f"{float(shapefl_target_cost):.6f}"
+        )
+        budget_accuracy_str = "n/a" if budget_accuracy is None else f"{float(budget_accuracy):.4f}"
         print(
             f"{strategy_name}: "
             f"final_acc={final_accuracy_str} "
+            f"acc_at_common_budget={budget_accuracy_str} "
             f"final_effective_cost_gb={final_cost_str} "
-            f"target_cost_gb={target_cost_str}"
+            f"target_cost_gb={target_cost_str} "
+            f"cost_to_shapefl_final_acc_gb={shapefl_target_cost_str} "
+            f"model_bytes={int(model_payload)} "
+            f"probe_bytes={int(probe_payload)}"
         )
+    print(f"Common effective budget: {common_budget:.6f} GB")
     print(f"Effective-cost comparison complete. Results saved to {args.output_dir}")
     return payload
 
