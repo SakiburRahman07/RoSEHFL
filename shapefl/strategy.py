@@ -48,7 +48,7 @@ from flwr.server.client_manager import ClientManager
 from .models.factory import get_model
 from .data.data_loader import DATASET_INFO
 from .algorithms.los import run_los
-from .algorithms.los_rose import run_los_rose
+from .algorithms.los_rose import run_los_rose, run_los_rose_candidates
 from .algorithms.label_planning import run_label_planning
 from .algorithms.cost_first_exact import run_cost_first_exact
 from .utils.similarity import compute_similarity_matrix
@@ -57,6 +57,7 @@ from .utils.shapley import (
     compute_hybrid_phi,
     compute_smc_shapley,
     deserialize_probe_logits,
+    evaluate_on_probe,
     extract_targets,
     mean_softmax_distribution,
     normalise_shapley,
@@ -186,6 +187,13 @@ class ShapeFlStrategy(fl.server.strategy.Strategy):
         self.c_ec: Dict = {}
         self.per_round_cost_gb = 0.0
         self.cumulative_cost_gb = 0.0
+        self.model_size_bytes = 0
+        self._reset_cycle_accounting()
+        self.effective_cumulative_cost_gb = 0.0
+        self._reported_paper_per_round_cost_gb = 0.0
+        self._reported_effective_per_round_cost_gb = 0.0
+        self._reported_model_payload_bytes = 0
+        self._reported_probe_payload_bytes = 0
 
         self.metrics_history = {
             "cloud_round": [],
@@ -193,6 +201,12 @@ class ShapeFlStrategy(fl.server.strategy.Strategy):
             "loss": [],
             "per_round_cost_gb": [],
             "cumulative_cost_gb": [],
+            "paper_per_round_cost_gb": [],
+            "paper_cumulative_cost_gb": [],
+            "effective_per_round_cost_gb": [],
+            "effective_cumulative_cost_gb": [],
+            "model_payload_bytes": [],
+            "probe_payload_bytes": [],
         }
 
     @property
@@ -289,11 +303,10 @@ class ShapeFlStrategy(fl.server.strategy.Strategy):
             sum(r.metrics.get("accuracy", 0.0) * r.num_examples for _, r in results)
             / total_examples
         )
-        self.metrics_history["cloud_round"].append(self.cloud_round)
-        self.metrics_history["accuracy"].append(weighted_acc)
-        self.metrics_history["loss"].append(weighted_loss)
-        self.metrics_history["per_round_cost_gb"].append(self.per_round_cost_gb)
-        self.metrics_history["cumulative_cost_gb"].append(self.cumulative_cost_gb)
+        self._record_completed_cloud_metrics(
+            accuracy=weighted_acc,
+            loss=weighted_loss,
+        )
         print(
             f"  Cloud Round {self.cloud_round}/{self.kappa} | "
             f"Acc: {weighted_acc:.4f} | Loss: {weighted_loss:.4f} | "
@@ -318,17 +331,15 @@ class ShapeFlStrategy(fl.server.strategy.Strategy):
         """
         if self.evaluate_fn is None:
             return None
-        if self.phase == "pretrain" or self.edge_epoch != 0:
+        if self.phase == "pretrain" or self.edge_epoch != 0 or self.cloud_round == 0:
             return None
         params = parameters_to_ndarrays(parameters)
         loss, metrics = self.evaluate_fn(server_round, params, {})
         accuracy = metrics.get("accuracy", 0.0)
-        # Feed into metrics_history so results stay consistent
-        self.metrics_history["cloud_round"].append(self.cloud_round)
-        self.metrics_history["accuracy"].append(accuracy)
-        self.metrics_history["loss"].append(loss)
-        self.metrics_history["per_round_cost_gb"].append(self.per_round_cost_gb)
-        self.metrics_history["cumulative_cost_gb"].append(self.cumulative_cost_gb)
+        self._record_completed_cloud_metrics(
+            accuracy=accuracy,
+            loss=loss,
+        )
         print(
             f"  Cloud Round {self.cloud_round}/{self.kappa} | "
             f"Acc: {accuracy:.4f} | Loss: {loss:.4f} | "
@@ -340,9 +351,80 @@ class ShapeFlStrategy(fl.server.strategy.Strategy):
     #  Private — phase handlers
     # ════════════════════════════════════════════════════════════════════
 
+    def _reset_cycle_accounting(self) -> None:
+        self.current_cycle_model_payload_bytes = 0
+        self.current_cycle_probe_payload_bytes = 0
+        self.current_cycle_effective_cost_gb = 0.0
+
+    def _record_model_transfer_cost(
+        self,
+        *,
+        base_cost_gb: float,
+        payload_bytes: int,
+    ) -> None:
+        payload = int(payload_bytes)
+        if payload <= 0:
+            return
+        self.current_cycle_model_payload_bytes += payload
+        self.current_cycle_effective_cost_gb += scaled_cost_from_payload(
+            float(base_cost_gb),
+            payload,
+            self.model_size_bytes,
+        )
+
+    def _paper_cost_for_completed_cycle(self, edge_epochs: int) -> float:
+        completed_edge_epochs = int(max(edge_epochs, 0))
+        if completed_edge_epochs <= 0:
+            return 0.0
+        node_edge_cost = sum(
+            float(self.c_ne[(node_id, edge_id)])
+            for edge_id in self.selected_edges
+            for node_id in self.edge_nodes[edge_id]
+        )
+        edge_cloud_cost = sum(float(self.c_ec[edge_id]) for edge_id in self.selected_edges)
+        return float(completed_edge_epochs * node_edge_cost + edge_cloud_cost)
+
+    def _finalise_completed_cycle(
+        self,
+        *,
+        paper_cost_gb: float,
+    ) -> None:
+        self.cumulative_cost_gb += float(paper_cost_gb)
+        self.effective_cumulative_cost_gb += float(self.current_cycle_effective_cost_gb)
+        self._reported_paper_per_round_cost_gb = float(paper_cost_gb)
+        self._reported_effective_per_round_cost_gb = float(self.current_cycle_effective_cost_gb)
+        self._reported_model_payload_bytes = int(self.current_cycle_model_payload_bytes)
+        self._reported_probe_payload_bytes = int(self.current_cycle_probe_payload_bytes)
+        self._reset_cycle_accounting()
+
+    def _record_completed_cloud_metrics(
+        self,
+        *,
+        accuracy: float,
+        loss: float,
+    ) -> None:
+        self.metrics_history["cloud_round"].append(int(self.cloud_round))
+        self.metrics_history["accuracy"].append(float(accuracy))
+        self.metrics_history["loss"].append(float(loss))
+        self.metrics_history["per_round_cost_gb"].append(float(self._reported_paper_per_round_cost_gb))
+        self.metrics_history["cumulative_cost_gb"].append(float(self.cumulative_cost_gb))
+        self.metrics_history["paper_per_round_cost_gb"].append(float(self._reported_paper_per_round_cost_gb))
+        self.metrics_history["paper_cumulative_cost_gb"].append(float(self.cumulative_cost_gb))
+        self.metrics_history["effective_per_round_cost_gb"].append(
+            float(self._reported_effective_per_round_cost_gb)
+        )
+        self.metrics_history["effective_cumulative_cost_gb"].append(
+            float(self.effective_cumulative_cost_gb)
+        )
+        self.metrics_history["model_payload_bytes"].append(int(self._reported_model_payload_bytes))
+        self.metrics_history["probe_payload_bytes"].append(int(self._reported_probe_payload_bytes))
+
     def _aggregate_pretrain(self, results):
         initial_ndarrays = parameters_to_ndarrays(self.initial_parameters)
         model_size_bytes = sum(w.nbytes for w in initial_ndarrays)
+        self.model_size_bytes = int(dense_payload_num_bytes(initial_ndarrays))
+        self._reset_cycle_accounting()
+        self.effective_cumulative_cost_gb = 0.0
         self.c_ne, self.c_ec = generate_communication_costs(
             self.num_nodes, model_size_bytes, topology=self.topology,
         )
@@ -416,6 +498,11 @@ class ShapeFlStrategy(fl.server.strategy.Strategy):
             weights = parameters_to_ndarrays(fit_res.parameters)
             edge_groups[edge_id][0].append(weights)
             edge_groups[edge_id][1].append(fit_res.num_examples)
+            payload_bytes = int(dense_payload_num_bytes(weights))
+            self._record_model_transfer_cost(
+                base_cost_gb=self.c_ne.get((node_id, edge_id), 0.0),
+                payload_bytes=payload_bytes,
+            )
 
         for edge_id, (ws, ss) in edge_groups.items():
             if not ws:
@@ -438,8 +525,15 @@ class ShapeFlStrategy(fl.server.strategy.Strategy):
 
             global_avg = _weighted_average(edge_weights, edge_sizes)
             self.global_parameters = ndarrays_to_parameters(global_avg)
-            if self.edge_epoch >= self.kappa_c:
-                self.cumulative_cost_gb += self.per_round_cost_gb
+            for edge_id in sorted(self.selected_edges):
+                payload_bytes = self.model_size_bytes
+                self._record_model_transfer_cost(
+                    base_cost_gb=self.c_ec.get(edge_id, 0.0),
+                    payload_bytes=payload_bytes,
+                )
+            self._finalise_completed_cycle(
+                paper_cost_gb=self._paper_cost_for_completed_cycle(self.edge_epoch)
+            )
             self.edge_epoch = 0
             self.cloud_round += 1
             return self.global_parameters, {"cloud_round": self.cloud_round}
@@ -845,6 +939,21 @@ class RoSEHFLStrategy(ShapeFlStrategy):
         logit_adjustment_tau: float = 0.0,
         local_bn: bool = False,
         edge_swa_k: int = 1,
+        planning_objective: str = "paper",
+        target_accuracy: Optional[float] = None,
+        accuracy_guard_tolerance: float = 0.02,
+        effective_planning_start_cloud_round: int = 0,
+        late_phase_start_fraction: float = 1.0,
+        effective_accuracy_delta: float = 0.0,
+        probe_emit_mode: str = "always",
+        client_compression_start_cloud_round: int = 2,
+        edge_compression_start_cloud_round: int = 2,
+        server_optimizer: str = "none",
+        server_lr: float = 0.03,
+        server_beta1: float = 0.9,
+        server_beta2: float = 0.99,
+        server_tau: float = 1e-3,
+        hard_edge_min_members: int = 0,
     ):
         super().__init__(
             model_name=model_name,
@@ -919,6 +1028,33 @@ class RoSEHFLStrategy(ShapeFlStrategy):
         self.logit_adjustment_tau = float(logit_adjustment_tau)
         self.local_bn = bool(local_bn)
         self.edge_swa_k = int(max(edge_swa_k, 1))
+        planning_objective_name = str(planning_objective or "paper").strip().lower()
+        if planning_objective_name not in {"paper", "effective"}:
+            raise ValueError(
+                "planning_objective must be either 'paper' or 'effective'"
+            )
+        self.planning_objective = planning_objective_name
+        self.target_accuracy = None if target_accuracy is None else float(target_accuracy)
+        self.accuracy_guard_tolerance = float(max(accuracy_guard_tolerance, 0.0))
+        self.effective_planning_start_cloud_round = int(max(effective_planning_start_cloud_round, 0))
+        self.late_phase_start_fraction = float(np.clip(late_phase_start_fraction, 0.0, 1.0))
+        self.effective_accuracy_delta = float(max(effective_accuracy_delta, 0.0))
+        probe_emit_mode_name = str(probe_emit_mode or "always").strip().lower()
+        if probe_emit_mode_name not in {"always", "cycle_start", "never"}:
+            raise ValueError("probe_emit_mode must be one of 'always', 'cycle_start', or 'never'")
+        self.probe_emit_mode = probe_emit_mode_name
+        self.client_compression_start_cloud_round = int(max(client_compression_start_cloud_round, 1))
+        self.edge_compression_start_cloud_round = int(max(edge_compression_start_cloud_round, 1))
+        server_optimizer_name = str(server_optimizer or "none").strip().lower()
+        if server_optimizer_name not in {"none", "fedadam"}:
+            raise ValueError("server_optimizer must be either 'none' or 'fedadam'")
+        self.server_optimizer = server_optimizer_name
+        self.server_lr = float(max(server_lr, 0.0))
+        self.server_beta1 = float(np.clip(server_beta1, 0.0, 1.0))
+        self.server_beta2 = float(np.clip(server_beta2, 0.0, 1.0))
+        self.server_tau = float(max(server_tau, 1e-12))
+        self.hard_edge_min_members = int(max(hard_edge_min_members, 0))
+        self._planning_candidate_pool_size = 6
 
         self.completed_flower_rounds = 0
         self.replan_count = 0
@@ -939,12 +1075,16 @@ class RoSEHFLStrategy(ShapeFlStrategy):
         self._latest_client_weights: Dict[int, List[np.ndarray]] = {}
         self._latest_client_sizes: Dict[int, int] = {}
         self._latest_probe_logits: Dict[int, np.ndarray] = {}
+        self._latest_probe_payload_bytes: Dict[int, int] = {}
         self._current_cycle_reference_weights = parameters_to_ndarrays(self.initial_parameters)
         self.edge_anchor_weights: Dict[int, List[np.ndarray]] = {}
         self.edge_swa_buffers: Dict[int, List[List[np.ndarray]]] = {}
         self.model_size_bytes = dense_payload_num_bytes(self._current_cycle_reference_weights)
         self.client_compression_residuals: Dict[int, List[np.ndarray]] = {}
         self.edge_compression_residuals: Dict[int, List[np.ndarray]] = {}
+        self.server_momentum_state: List[np.ndarray] = []
+        self.server_variance_state: List[np.ndarray] = []
+        self.server_optimizer_step = 0
         self.current_cycle_model_payload_bytes = 0
         self.current_cycle_probe_payload_bytes = 0
         self.current_cycle_effective_cost_gb = 0.0
@@ -1108,6 +1248,22 @@ class RoSEHFLStrategy(ShapeFlStrategy):
 
     def _serialise_plan(self) -> Dict[str, object]:
         return {
+            "planning_signal": self.planning_signal,
+            "planning_objective": self.planning_objective,
+            "target_accuracy": None if self.target_accuracy is None else float(self.target_accuracy),
+            "accuracy_guard_tolerance": float(self.accuracy_guard_tolerance),
+            "effective_planning_start_cloud_round": int(self.effective_planning_start_cloud_round),
+            "late_phase_start_fraction": float(self.late_phase_start_fraction),
+            "effective_accuracy_delta": float(self.effective_accuracy_delta),
+            "probe_emit_mode": self.probe_emit_mode,
+            "client_compression_start_cloud_round": int(self.client_compression_start_cloud_round),
+            "edge_compression_start_cloud_round": int(self.edge_compression_start_cloud_round),
+            "server_optimizer": self.server_optimizer,
+            "server_lr": float(self.server_lr),
+            "server_beta1": float(self.server_beta1),
+            "server_beta2": float(self.server_beta2),
+            "server_tau": float(self.server_tau),
+            "hard_edge_min_members": int(self.hard_edge_min_members),
             "selected_edges": sorted(int(edge_id) for edge_id in self.selected_edges),
             "edge_nodes": {
                 str(edge_id): sorted(int(node_id) for node_id in nodes)
@@ -1162,7 +1318,14 @@ class RoSEHFLStrategy(ShapeFlStrategy):
         )
         return {
             "planning_signal": self.planning_signal,
+            "planning_objective": self.planning_objective,
+            "target_accuracy": None if self.target_accuracy is None else float(self.target_accuracy),
+            "accuracy_guard_tolerance": float(self.accuracy_guard_tolerance),
             "emit_probe_logits": self.emit_probe_logits,
+            "effective_planning_start_cloud_round": int(self.effective_planning_start_cloud_round),
+            "late_phase_start_fraction": float(self.late_phase_start_fraction),
+            "effective_accuracy_delta": float(self.effective_accuracy_delta),
+            "probe_emit_mode": self.probe_emit_mode,
             "probe_size": self.probe_size,
             "dp_epsilon": self.dp_epsilon,
             "dp_delta": self.dp_delta,
@@ -1173,12 +1336,21 @@ class RoSEHFLStrategy(ShapeFlStrategy):
             "compression_eta": self.compression_eta,
             "compression_target_deficit": self.compression_target_deficit,
             "compress_edge_to_cloud": self.compress_edge_to_cloud,
+            "client_compression_start_cloud_round": int(self.client_compression_start_cloud_round),
+            "edge_compression_start_cloud_round": int(self.edge_compression_start_cloud_round),
             "edge_min_members": self.edge_min_members,
             "edge_underfill_penalty": self.edge_underfill_penalty,
+            "hard_edge_min_members": int(self.hard_edge_min_members),
+            "server_optimizer": self.server_optimizer,
+            "server_lr": float(self.server_lr),
+            "server_beta1": float(self.server_beta1),
+            "server_beta2": float(self.server_beta2),
+            "server_tau": float(self.server_tau),
             "total_probe_payload_bytes": int(self.total_probe_payload_bytes),
             "average_probe_payload_bytes_per_round": avg_bytes,
             "per_round_probe_payload_bytes": [int(value) for value in self.round_probe_payload_bytes],
             "total_model_payload_bytes": int(sum(self.metrics_history.get("model_payload_bytes", []))),
+            "candidate_pool_size": int(self._planning_candidate_pool_size),
         }
 
     def _status_payload(self, completed: bool) -> Dict[str, object]:
@@ -1219,6 +1391,21 @@ class RoSEHFLStrategy(ShapeFlStrategy):
             "current_gamma": self.current_gamma,
             "current_gamma_used": self.current_gamma_used,
             "current_edge_balance_deficit": self.current_edge_balance_deficit,
+            "planning_objective": self.planning_objective,
+            "target_accuracy": self.target_accuracy,
+            "accuracy_guard_tolerance": self.accuracy_guard_tolerance,
+            "effective_planning_start_cloud_round": self.effective_planning_start_cloud_round,
+            "late_phase_start_fraction": self.late_phase_start_fraction,
+            "effective_accuracy_delta": self.effective_accuracy_delta,
+            "probe_emit_mode": self.probe_emit_mode,
+            "client_compression_start_cloud_round": self.client_compression_start_cloud_round,
+            "edge_compression_start_cloud_round": self.edge_compression_start_cloud_round,
+            "server_optimizer": self.server_optimizer,
+            "server_lr": self.server_lr,
+            "server_beta1": self.server_beta1,
+            "server_beta2": self.server_beta2,
+            "server_tau": self.server_tau,
+            "hard_edge_min_members": self.hard_edge_min_members,
             "plan_history": self.plan_history,
             "shapley_history": self.shapley_history,
             "drift_history": self.drift_history,
@@ -1255,6 +1442,13 @@ class RoSEHFLStrategy(ShapeFlStrategy):
                 int(edge_id): self._weights_copy(weights)
                 for edge_id, weights in self.edge_compression_residuals.items()
             },
+            "latest_probe_payload_bytes": {
+                int(node_id): int(value)
+                for node_id, value in self._latest_probe_payload_bytes.items()
+            },
+            "server_momentum_state": self._weights_copy(self.server_momentum_state),
+            "server_variance_state": self._weights_copy(self.server_variance_state),
+            "server_optimizer_step": int(self.server_optimizer_step),
             "numpy_rng_state": np.random.get_state(),
         }
 
@@ -1307,6 +1501,42 @@ class RoSEHFLStrategy(ShapeFlStrategy):
         self.current_gamma = float(state["current_gamma"])
         self.current_gamma_used = float(state.get("current_gamma_used", self.current_gamma))
         self.current_edge_balance_deficit = float(state.get("current_edge_balance_deficit", 0.0))
+        self.planning_objective = str(state.get("planning_objective", self.planning_objective))
+        loaded_target_accuracy = state.get("target_accuracy", self.target_accuracy)
+        self.target_accuracy = None if loaded_target_accuracy is None else float(loaded_target_accuracy)
+        self.accuracy_guard_tolerance = float(
+            state.get("accuracy_guard_tolerance", self.accuracy_guard_tolerance)
+        )
+        self.effective_planning_start_cloud_round = int(
+            state.get("effective_planning_start_cloud_round", self.effective_planning_start_cloud_round)
+        )
+        self.late_phase_start_fraction = float(
+            state.get("late_phase_start_fraction", self.late_phase_start_fraction)
+        )
+        self.effective_accuracy_delta = float(
+            state.get("effective_accuracy_delta", self.effective_accuracy_delta)
+        )
+        self.probe_emit_mode = str(state.get("probe_emit_mode", self.probe_emit_mode))
+        self.client_compression_start_cloud_round = int(
+            state.get(
+                "client_compression_start_cloud_round",
+                self.client_compression_start_cloud_round,
+            )
+        )
+        self.edge_compression_start_cloud_round = int(
+            state.get(
+                "edge_compression_start_cloud_round",
+                self.edge_compression_start_cloud_round,
+            )
+        )
+        self.server_optimizer = str(state.get("server_optimizer", self.server_optimizer))
+        self.server_lr = float(state.get("server_lr", self.server_lr))
+        self.server_beta1 = float(state.get("server_beta1", self.server_beta1))
+        self.server_beta2 = float(state.get("server_beta2", self.server_beta2))
+        self.server_tau = float(state.get("server_tau", self.server_tau))
+        self.hard_edge_min_members = int(
+            state.get("hard_edge_min_members", self.hard_edge_min_members)
+        )
         self.plan_history = list(state["plan_history"])
         self.shapley_history = list(state["shapley_history"])
         self.drift_history = list(state["drift_history"])
@@ -1351,6 +1581,13 @@ class RoSEHFLStrategy(ShapeFlStrategy):
             int(edge_id): self._weights_copy(weights)
             for edge_id, weights in state.get("edge_compression_residuals", {}).items()
         }
+        self._latest_probe_payload_bytes = {
+            int(node_id): int(value)
+            for node_id, value in state.get("latest_probe_payload_bytes", {}).items()
+        }
+        self.server_momentum_state = self._weights_copy(state.get("server_momentum_state", []))
+        self.server_variance_state = self._weights_copy(state.get("server_variance_state", []))
+        self.server_optimizer_step = int(state.get("server_optimizer_step", 0))
         if "numpy_rng_state" in state:
             np.random.set_state(state["numpy_rng_state"])
 
@@ -1387,8 +1624,73 @@ class RoSEHFLStrategy(ShapeFlStrategy):
             return float(np.median(list(self.c_ec.values())))
         return 0.0
 
-    def _compression_keep_ratio(self, *, edge_to_cloud: bool = False) -> float:
-        if not self.compression_enabled or self.cloud_round == 0:
+    def _planned_cycle_cloud_round(self, planning_round: int) -> int:
+        return max(1, int(planning_round) + 1)
+
+    def _total_scheduled_cloud_rounds(self) -> int:
+        if self.total_local_epochs is None:
+            return max(int(self.kappa), 1)
+        remaining_training_epochs = max(self.total_local_epochs - self.warmup_epochs, 0)
+        return max(1, math.ceil(remaining_training_epochs / max(self.kappa_e * self.kappa_c, 1)))
+
+    def _late_phase_start_cloud_round(self) -> int:
+        total_rounds = self._total_scheduled_cloud_rounds()
+        threshold = int(math.ceil(total_rounds * self.late_phase_start_fraction))
+        return max(1, threshold)
+
+    def _planning_phase(self, planning_round: int) -> str:
+        planned_cycle_cloud_round = self._planned_cycle_cloud_round(planning_round)
+        if self.planning_objective != "effective":
+            return "paper"
+        if planned_cycle_cloud_round < self.effective_planning_start_cloud_round:
+            return "paper"
+        if (
+            self.late_phase_start_fraction < 1.0
+            and planned_cycle_cloud_round >= self._late_phase_start_cloud_round()
+        ):
+            return "late"
+        return "mid"
+
+    def _planning_objective_active(self, planning_round: int) -> str:
+        return "effective" if self._planning_phase(planning_round) in {"mid", "late"} else "paper"
+
+    def _should_emit_probe_logits(self) -> bool:
+        if not self.emit_probe_logits or self.planning_signal not in {"shapley", "hybrid"}:
+            return False
+        if self.phase == "warmup":
+            return self.probe_emit_mode != "never"
+        if self.probe_emit_mode == "always":
+            return True
+        if self.probe_emit_mode == "cycle_start":
+            return self.edge_epoch == 0
+        return False
+
+    def _compression_enabled_for_cycle(
+        self,
+        *,
+        edge_to_cloud: bool = False,
+        cycle_cloud_round: int,
+    ) -> bool:
+        if not self.compression_enabled:
+            return False
+        start_round = (
+            self.edge_compression_start_cloud_round
+            if edge_to_cloud
+            else self.client_compression_start_cloud_round
+        )
+        return int(cycle_cloud_round) >= int(start_round)
+
+    def _compression_keep_ratio(
+        self,
+        *,
+        edge_to_cloud: bool = False,
+        cycle_cloud_round: Optional[int] = None,
+    ) -> float:
+        cycle_round = self._current_cycle_cloud_round() if cycle_cloud_round is None else int(cycle_cloud_round)
+        if not self._compression_enabled_for_cycle(
+            edge_to_cloud=edge_to_cloud,
+            cycle_cloud_round=cycle_round,
+        ):
             return 1.0
         ratio = self.compression_keep_ratio_min * math.exp(
             self.compression_eta
@@ -1402,6 +1704,73 @@ class RoSEHFLStrategy(ShapeFlStrategy):
         if edge_to_cloud:
             return max(0.10, ratio)
         return ratio
+
+    def _current_cycle_cloud_round(self) -> int:
+        return max(1, self.cloud_round + 1)
+
+    def _is_candidate_hard_feasible(self, candidate: Dict[str, object]) -> bool:
+        minimum_members = int(max(self.hard_edge_min_members, 0))
+        if minimum_members <= 0:
+            return True
+        edge_nodes = candidate.get("edge_nodes", {})
+        return all(len(nodes) >= minimum_members for nodes in edge_nodes.values())
+
+    def _ensure_server_optimizer_state(
+        self,
+        reference_weights: List[np.ndarray],
+    ) -> None:
+        if (
+            len(self.server_momentum_state) != len(reference_weights)
+            or len(self.server_variance_state) != len(reference_weights)
+        ):
+            self.server_momentum_state = zero_residuals_like(reference_weights)
+            self.server_variance_state = zero_residuals_like(reference_weights)
+            self.server_optimizer_step = 0
+
+    def _apply_server_optimizer(
+        self,
+        *,
+        reference_weights: List[np.ndarray],
+        aggregated_weights: List[np.ndarray],
+        update_state: bool,
+    ) -> List[np.ndarray]:
+        if self.server_optimizer != "fedadam":
+            return self._weights_copy(aggregated_weights)
+
+        self._ensure_server_optimizer_state(reference_weights)
+        momentum_state = (
+            self.server_momentum_state
+            if update_state
+            else self._weights_copy(self.server_momentum_state)
+        )
+        variance_state = (
+            self.server_variance_state
+            if update_state
+            else self._weights_copy(self.server_variance_state)
+        )
+
+        updated_weights: List[np.ndarray] = []
+        for index, (reference, aggregated) in enumerate(zip(reference_weights, aggregated_weights)):
+            reference_float = reference.astype(np.float64, copy=False)
+            delta = aggregated.astype(np.float64, copy=False) - reference_float
+            momentum = (
+                self.server_beta1 * momentum_state[index].astype(np.float64, copy=False)
+                + (1.0 - self.server_beta1) * delta
+            )
+            variance = (
+                self.server_beta2 * variance_state[index].astype(np.float64, copy=False)
+                + (1.0 - self.server_beta2) * np.square(delta)
+            )
+            step = reference_float + self.server_lr * momentum / (np.sqrt(variance) + self.server_tau)
+            momentum_state[index] = momentum.astype(reference.dtype, copy=False)
+            variance_state[index] = variance.astype(reference.dtype, copy=False)
+            updated_weights.append(step.astype(reference.dtype, copy=False))
+
+        if update_state:
+            self.server_momentum_state = momentum_state
+            self.server_variance_state = variance_state
+            self.server_optimizer_step += 1
+        return updated_weights
 
     def _reset_cycle_accounting(self) -> None:
         self.current_cycle_model_payload_bytes = 0
@@ -1509,7 +1878,16 @@ class RoSEHFLStrategy(ShapeFlStrategy):
 
         self._latest_client_weights = client_weights
         self._latest_client_sizes = client_sizes
-        self._latest_probe_logits = probe_logits
+        if probe_logits:
+            self._latest_probe_logits = {
+                int(node_id): logits
+                for node_id, logits in probe_logits.items()
+            }
+            self._latest_probe_payload_bytes = {
+                int(node_id): int(payload_bytes)
+                for node_id, payload_bytes in probe_payload_bytes.items()
+                if int(payload_bytes) > 0
+            }
         if round_probe_bytes > 0:
             self.total_probe_payload_bytes += round_probe_bytes
         self.round_probe_payload_bytes.append(int(round_probe_bytes))
@@ -1537,47 +1915,493 @@ class RoSEHFLStrategy(ShapeFlStrategy):
             distributions[node_id] = mean_softmax_distribution(logits)
         return distributions
 
-    def _apply_los_result(self, los_result) -> None:
+    def _candidate_from_assignment(
+        self,
+        *,
+        selected_edges: Set[int],
+        edge_nodes: Dict[int, List[int]],
+        edge_data_sizes: Dict[int, int],
+        objective_value: float,
+        source: str,
+    ) -> Dict[str, object]:
+        normalised_edges = {int(edge_id) for edge_id in selected_edges}
+        normalised_edge_nodes = {
+            int(edge_id): [int(node_id) for node_id in sorted(nodes)]
+            for edge_id, nodes in edge_nodes.items()
+            if int(edge_id) in normalised_edges
+        }
+        normalised_edge_data_sizes = {
+            int(edge_id): int(size)
+            for edge_id, size in edge_data_sizes.items()
+            if int(edge_id) in normalised_edges
+        }
+        normalised_node_edge: Dict[int, int] = {}
+        for edge_id, nodes in normalised_edge_nodes.items():
+            for node_id in nodes:
+                normalised_node_edge[int(node_id)] = int(edge_id)
+        return {
+            "selected_edges": normalised_edges,
+            "edge_nodes": normalised_edge_nodes,
+            "edge_data_sizes": normalised_edge_data_sizes,
+            "node_edge": normalised_node_edge,
+            "objective_value": float(objective_value),
+            "source": str(source),
+        }
+
+    def _candidate_from_los_result(
+        self,
+        los_result,
+        *,
+        source: str,
+    ) -> Dict[str, object]:
         if los_result is None or los_result.node_associations is None:
             raise RuntimeError("RoSE planning produced no valid node associations")
-        self.selected_edges = {int(edge_id) for edge_id in los_result.selected_edges}
+        return self._candidate_from_assignment(
+            selected_edges={int(edge_id) for edge_id in los_result.selected_edges},
+            edge_nodes={
+                int(edge_id): [int(node_id) for node_id in sorted(nodes)]
+                for edge_id, nodes in los_result.node_associations.edge_nodes.items()
+            },
+            edge_data_sizes={
+                int(edge_id): int(size)
+                for edge_id, size in los_result.node_associations.edge_data_sizes.items()
+            },
+            objective_value=float(los_result.objective_value),
+            source=source,
+        )
+
+    def _current_plan_candidate(self) -> Optional[Dict[str, object]]:
+        if not self.selected_edges or not self.edge_nodes or not self.node_edge:
+            return None
+        return self._candidate_from_assignment(
+            selected_edges=set(self.selected_edges),
+            edge_nodes={int(edge_id): list(nodes) for edge_id, nodes in self.edge_nodes.items()},
+            edge_data_sizes={int(edge_id): int(size) for edge_id, size in self.edge_data_sizes.items()},
+            objective_value=float(self.per_round_cost_gb),
+            source="current",
+        )
+
+    def _commit_plan_candidate(
+        self,
+        candidate: Dict[str, object],
+    ) -> None:
+        self.selected_edges = {int(edge_id) for edge_id in candidate["selected_edges"]}
         self.edge_nodes = {
-            int(edge_id): [int(node_id) for node_id in sorted(nodes)]
-            for edge_id, nodes in los_result.node_associations.edge_nodes.items()
+            int(edge_id): [int(node_id) for node_id in nodes]
+            for edge_id, nodes in candidate["edge_nodes"].items()
         }
         self.edge_data_sizes = {
             int(edge_id): int(size)
-            for edge_id, size in los_result.node_associations.edge_data_sizes.items()
+            for edge_id, size in candidate["edge_data_sizes"].items()
         }
-        self.node_edge = {}
-        for edge_id, nodes in self.edge_nodes.items():
-            for node_id in nodes:
-                self.node_edge[node_id] = edge_id
+        self.node_edge = {
+            int(node_id): int(edge_id)
+            for node_id, edge_id in candidate["node_edge"].items()
+        }
         self._compute_per_round_cost()
+        global_weights = self._weights_copy(parameters_to_ndarrays(self.global_parameters))
         self.edge_parameters = {
-            int(edge_id): ndarrays_to_parameters(
-                self._weights_copy(parameters_to_ndarrays(self.global_parameters))
-            )
+            int(edge_id): ndarrays_to_parameters(self._weights_copy(global_weights))
             for edge_id in self.selected_edges
         }
         self.edge_anchor_weights = {
-            int(edge_id): self._weights_copy(parameters_to_ndarrays(self.global_parameters))
+            int(edge_id): self._weights_copy(global_weights)
             for edge_id in self.selected_edges
         }
         self.edge_swa_buffers = {int(edge_id): [] for edge_id in self.selected_edges}
         self.drift_bank.reset(self.selected_edges)
+
+    def _apply_los_result(self, los_result) -> None:
+        self._commit_plan_candidate(
+            self._candidate_from_los_result(los_result, source="los_result")
+        )
+
+    def _remaining_scheduled_cloud_rounds(self, planning_round: int) -> int:
+        if self.total_local_epochs is not None:
+            remaining_local_epochs = max(self.total_local_epochs - self.completed_local_epochs, 0)
+            return max(1, math.ceil(remaining_local_epochs / max(self.kappa_e * self.kappa_c, 1)))
+        return max(1, self.kappa - int(planning_round))
+
+    def _stage_replan_reason(self, planning_round: int) -> Optional[str]:
+        if self.planning_objective != "effective" or not self.selected_edges:
+            return None
+        previous_round = int(planning_round) - 1
+        current_phase = self._planning_phase(planning_round)
+        previous_phase = self._planning_phase(previous_round) if previous_round >= 0 else "paper"
+        if current_phase != previous_phase:
+            return f"stage@{int(planning_round)}:{current_phase}"
+        return None
+
+    def _estimate_reconfiguration_change_cost_gb(
+        self,
+        candidate: Dict[str, object],
+    ) -> float:
+        if not self.selected_edges or not self.node_edge:
+            return 0.0
+        candidate_node_edge = {
+            int(node_id): int(edge_id)
+            for node_id, edge_id in candidate["node_edge"].items()
+        }
+        changed_nodes = [
+            int(node_id)
+            for node_id, edge_id in candidate_node_edge.items()
+            if self.node_edge.get(int(node_id)) != int(edge_id)
+        ]
+        changed_edges = (
+            {int(edge_id) for edge_id in candidate["selected_edges"]} ^ set(self.selected_edges)
+        )
+        node_cost = sum(
+            float(self.c_ne.get((int(node_id), int(candidate_node_edge[node_id])), 0.0))
+            for node_id in changed_nodes
+        )
+        edge_cost = sum(float(self.c_ec.get(int(edge_id), 0.0)) for edge_id in changed_edges)
+        return float(node_cost + edge_cost)
+
+    def _simulate_candidate_cycle(
+        self,
+        *,
+        candidate: Dict[str, object],
+        client_weights: Dict[int, List[np.ndarray]],
+        client_sizes: Dict[int, int],
+        planning_round: int,
+        probe_payload_bytes: Optional[Dict[int, int]] = None,
+        include_probe_payload: bool = False,
+    ) -> Dict[str, object]:
+        if self.model_factory is None or self.probe_loader is None:
+            raise RuntimeError("Effective planning requires probe_loader and model_factory")
+
+        candidate_node_edge = {
+            int(node_id): int(edge_id)
+            for node_id, edge_id in candidate["node_edge"].items()
+        }
+        cycle_cloud_round = self._planned_cycle_cloud_round(planning_round)
+        compress_clients_this_cycle = self._compression_enabled_for_cycle(
+            edge_to_cloud=False,
+            cycle_cloud_round=cycle_cloud_round,
+        )
+        compress_edges_this_cycle = self._compression_enabled_for_cycle(
+            edge_to_cloud=True,
+            cycle_cloud_round=cycle_cloud_round,
+        )
+        node_keep_ratio = self._compression_keep_ratio(
+            edge_to_cloud=False,
+            cycle_cloud_round=cycle_cloud_round,
+        )
+        edge_keep_ratio = self._compression_keep_ratio(
+            edge_to_cloud=True,
+            cycle_cloud_round=cycle_cloud_round,
+        )
+        global_reference_weights = self._weights_copy(self._current_cycle_reference_weights)
+
+        effective_cost_gb = 0.0
+        model_payload_bytes = 0
+        probe_total_payload_bytes = 0
+        edge_groups: Dict[int, Dict[str, object]] = defaultdict(
+            lambda: {"weights": [], "sizes": [], "nodes": []}
+        )
+
+        for node_id, payload_bytes in (probe_payload_bytes or {}).items():
+            payload = int(payload_bytes)
+            if payload <= 0:
+                continue
+            probe_total_payload_bytes += payload
+            if include_probe_payload:
+                effective_cost_gb += scaled_cost_from_payload(
+                    self.c_ec.get(int(node_id), 0.0),
+                    payload,
+                    self.model_size_bytes,
+                )
+
+        for node_id, weights in client_weights.items():
+            edge_id = candidate_node_edge.get(int(node_id))
+            if edge_id is None:
+                continue
+
+            transmitted_weights = self._weights_copy(weights)
+            payload_bytes = int(self.model_size_bytes)
+            if compress_clients_this_cycle:
+                compression = compress_weight_update(
+                    reference_weights=global_reference_weights,
+                    target_weights=weights,
+                    keep_ratio=node_keep_ratio,
+                    residuals=self.client_compression_residuals.get(int(node_id)),
+                    dense_layer_indices=self.dense_compression_indices,
+                )
+                transmitted_weights = compression.reconstructed_weights
+                payload_bytes = int(compression.payload_bytes)
+
+            model_payload_bytes += payload_bytes
+            effective_cost_gb += scaled_cost_from_payload(
+                self.c_ne.get((int(node_id), int(edge_id)), 0.0),
+                payload_bytes,
+                self.model_size_bytes,
+            )
+            edge_groups[int(edge_id)]["weights"].append(transmitted_weights)
+            edge_groups[int(edge_id)]["sizes"].append(int(client_sizes[int(node_id)]))
+            edge_groups[int(edge_id)]["nodes"].append(int(node_id))
+
+        edge_weights: List[List[np.ndarray]] = []
+        edge_sizes: List[int] = []
+        for edge_id in sorted(int(edge) for edge in candidate["selected_edges"]):
+            group = edge_groups.get(int(edge_id))
+            if not group or not group["weights"]:
+                continue
+
+            aggregate, _ = aggregate_with_rule(
+                rule=self.agg_rule,
+                node_ids=group["nodes"],
+                weights_list=group["weights"],
+                sizes=group["sizes"],
+                phi=self.current_phi if self.current_phi else None,
+                trim_ratio=self.agg_trim_ratio,
+                krum_f=self.krum_f,
+                beta=self.beta,
+                eta=self.eta,
+                xi=self.xi,
+                zeta=self.zeta,
+                alpha_cap_multiplier=self.alpha_cap_multiplier,
+                use_shrinkage=self.trust_use_shrinkage,
+                prior_a=self.trust_prior_a,
+                prior_b=self.trust_prior_b,
+                nu=self.trust_nu,
+                dev_clip_q=self.trust_dev_clip_q,
+            )
+            aggregate = self._mask_batch_norm_weights(aggregate, global_reference_weights)
+
+            transmitted_edge_weights = self._weights_copy(aggregate)
+            payload_bytes = int(self.model_size_bytes)
+            if compress_edges_this_cycle and self.compress_edge_to_cloud:
+                compression = compress_weight_update(
+                    reference_weights=global_reference_weights,
+                    target_weights=aggregate,
+                    keep_ratio=edge_keep_ratio,
+                    residuals=self.edge_compression_residuals.get(int(edge_id)),
+                    dense_layer_indices=self.dense_compression_indices,
+                )
+                transmitted_edge_weights = compression.reconstructed_weights
+                payload_bytes = int(compression.payload_bytes)
+
+            model_payload_bytes += payload_bytes
+            effective_cost_gb += scaled_cost_from_payload(
+                self.c_ec.get(int(edge_id), 0.0),
+                payload_bytes,
+                self.model_size_bytes,
+            )
+            edge_weights.append(transmitted_edge_weights)
+            edge_sizes.append(int(sum(group["sizes"])))
+
+        if edge_weights:
+            simulated_global = _weighted_average(edge_weights, edge_sizes)
+            simulated_global = self._mask_batch_norm_weights(
+                simulated_global,
+                global_reference_weights,
+            )
+            simulated_global = self._apply_server_optimizer(
+                reference_weights=global_reference_weights,
+                aggregated_weights=simulated_global,
+                update_state=False,
+            )
+        else:
+            simulated_global = self._weights_copy(global_reference_weights)
+
+        simulated_probe_accuracy = evaluate_on_probe(
+            simulated_global,
+            self.model_factory,
+            self.probe_loader,
+            self.server_device,
+        )
+        return {
+            "paper_per_round_cost_gb": float(self._estimate_plan_cost_gb(candidate["edge_nodes"])),
+            "effective_per_round_cost_gb": float(effective_cost_gb),
+            "simulated_probe_accuracy": float(simulated_probe_accuracy),
+            "model_payload_bytes": int(model_payload_bytes),
+            "probe_payload_bytes": int(probe_total_payload_bytes),
+        }
+
+    def _project_remaining_rounds(
+        self,
+        *,
+        current_probe_accuracy: float,
+        candidate_probe_accuracy: float,
+        planning_round: int,
+    ) -> int:
+        scheduled_rounds = self._remaining_scheduled_cloud_rounds(planning_round)
+        if self.target_accuracy is None:
+            return int(scheduled_rounds)
+
+        target = float(self.target_accuracy)
+        if candidate_probe_accuracy >= target or current_probe_accuracy >= target:
+            return 1
+
+        gain = float(candidate_probe_accuracy - current_probe_accuracy)
+        if gain <= 1e-9:
+            return int(scheduled_rounds)
+
+        estimated = int(math.ceil((target - current_probe_accuracy) / gain))
+        return int(max(1, min(scheduled_rounds, estimated)))
+
+    def _evaluate_candidate_plan(
+        self,
+        *,
+        candidate: Dict[str, object],
+        client_weights: Dict[int, List[np.ndarray]],
+        client_sizes: Dict[int, int],
+        probe_payload_bytes: Optional[Dict[int, int]],
+        current_probe_accuracy: float,
+        planning_round: int,
+    ) -> Dict[str, object]:
+        evaluated = dict(candidate)
+        evaluated.update(
+            self._simulate_candidate_cycle(
+                candidate=candidate,
+                client_weights=client_weights,
+                client_sizes=client_sizes,
+                planning_round=planning_round,
+                probe_payload_bytes=probe_payload_bytes,
+            )
+        )
+        evaluated["change_cost_gb"] = float(self._estimate_reconfiguration_change_cost_gb(candidate))
+        evaluated["projected_remaining_rounds"] = int(
+            self._project_remaining_rounds(
+                current_probe_accuracy=float(current_probe_accuracy),
+                candidate_probe_accuracy=float(evaluated["simulated_probe_accuracy"]),
+                planning_round=planning_round,
+            )
+        )
+        if self.planning_objective == "effective":
+            evaluated["planning_score_gb"] = float(
+                evaluated["change_cost_gb"]
+                + evaluated["projected_remaining_rounds"] * evaluated["effective_per_round_cost_gb"]
+            )
+        else:
+            evaluated["planning_score_gb"] = float(evaluated["paper_per_round_cost_gb"])
+        return evaluated
+
+    def _select_effective_candidate(
+        self,
+        candidates: List[Dict[str, object]],
+        *,
+        planning_round: int,
+    ) -> Tuple[Dict[str, object], List[Dict[str, object]]]:
+        if not candidates:
+            raise RuntimeError("No candidate plans available for effective-cost selection")
+
+        tolerance = float(max(self.accuracy_guard_tolerance, 0.0))
+        planning_phase = self._planning_phase(planning_round)
+        use_best_probe_delta = planning_phase == "mid" and self.effective_accuracy_delta > 0.0
+        baseline = next((candidate for candidate in candidates if candidate.get("source") == "current"), None)
+        hard_feasible = []
+        for candidate in candidates:
+            candidate["hard_member_feasible"] = bool(self._is_candidate_hard_feasible(candidate))
+            candidate["planning_phase"] = planning_phase
+            candidate["selected_candidate"] = False
+            candidate["selection_reason"] = ""
+        for candidate in candidates:
+            if candidate["hard_member_feasible"]:
+                hard_feasible.append(candidate)
+        fallback_to_current = baseline is not None and not hard_feasible and self.hard_edge_min_members > 0
+        selection_pool = hard_feasible if hard_feasible else ([baseline] if fallback_to_current else candidates)
+
+        baseline_reason = "current_topology"
+        if baseline is None or baseline not in selection_pool or use_best_probe_delta:
+            baseline = max(
+                selection_pool,
+                key=lambda candidate: (
+                    float(candidate.get("simulated_probe_accuracy", float("-inf"))),
+                    -float(candidate.get("planning_score_gb", float("inf"))),
+                ),
+            )
+            baseline_reason = "best_probe_accuracy"
+
+        threshold_margin = self.effective_accuracy_delta if use_best_probe_delta else tolerance
+        threshold = float(baseline.get("simulated_probe_accuracy", 0.0)) - float(threshold_margin)
+        for candidate in candidates:
+            candidate["baseline_candidate"] = bool(candidate is baseline)
+            candidate["baseline_reason"] = baseline_reason if candidate is baseline else ""
+            candidate["accuracy_guard_threshold"] = float(threshold)
+            candidate["accuracy_guard_passed"] = bool(
+                candidate in selection_pool
+                and float(candidate.get("simulated_probe_accuracy", float("-inf"))) + 1e-12 >= threshold
+            )
+            if candidate not in selection_pool and not candidate["hard_member_feasible"]:
+                candidate["selection_reason"] = "rejected_hard_edge_min_members"
+
+        if fallback_to_current:
+            chosen = baseline
+        else:
+            feasible = [candidate for candidate in selection_pool if candidate["accuracy_guard_passed"]]
+            if not feasible:
+                feasible = [baseline]
+
+            chosen = min(
+                feasible,
+                key=lambda candidate: (
+                    float(candidate.get("planning_score_gb", float("inf"))),
+                    -float(candidate.get("simulated_probe_accuracy", float("-inf"))),
+                    len(candidate.get("selected_edges", [])),
+                    tuple(sorted(int(edge_id) for edge_id in candidate.get("selected_edges", set()))),
+                ),
+            )
+        for candidate in candidates:
+            if candidate is chosen:
+                if fallback_to_current and not candidate["hard_member_feasible"]:
+                    candidate["selection_reason"] = "selected_current_hard_filter_fallback"
+                else:
+                    candidate["selection_reason"] = "selected"
+                candidate["selected_candidate"] = True
+            elif not candidate["accuracy_guard_passed"]:
+                if candidate["selection_reason"] == "":
+                    candidate["selection_reason"] = "rejected_accuracy_guard"
+            elif candidate is baseline:
+                candidate["selection_reason"] = "baseline_candidate"
+            elif not candidate["hard_member_feasible"]:
+                candidate["selection_reason"] = "rejected_hard_edge_min_members"
+            else:
+                candidate["selection_reason"] = "higher_effective_score"
+        return chosen, candidates
+
+    @staticmethod
+    def _serialise_candidate_evaluation(candidate: Dict[str, object]) -> Dict[str, object]:
+        return {
+            "source": str(candidate.get("source", "")),
+            "selected_edges": sorted(int(edge_id) for edge_id in candidate.get("selected_edges", set())),
+            "edge_nodes": {
+                str(edge_id): [int(node_id) for node_id in nodes]
+                for edge_id, nodes in candidate.get("edge_nodes", {}).items()
+            },
+            "objective_value": float(candidate.get("objective_value", 0.0)),
+            "paper_per_round_cost_gb": float(candidate.get("paper_per_round_cost_gb", 0.0)),
+            "effective_per_round_cost_gb": float(candidate.get("effective_per_round_cost_gb", 0.0)),
+            "change_cost_gb": float(candidate.get("change_cost_gb", 0.0)),
+            "projected_remaining_rounds": int(candidate.get("projected_remaining_rounds", 0)),
+            "planning_score_gb": float(candidate.get("planning_score_gb", 0.0)),
+            "simulated_probe_accuracy": float(candidate.get("simulated_probe_accuracy", 0.0)),
+            "model_payload_bytes": int(candidate.get("model_payload_bytes", 0)),
+            "probe_payload_bytes": int(candidate.get("probe_payload_bytes", 0)),
+            "baseline_candidate": bool(candidate.get("baseline_candidate", False)),
+            "baseline_reason": str(candidate.get("baseline_reason", "")),
+            "accuracy_guard_threshold": float(candidate.get("accuracy_guard_threshold", 0.0)),
+            "accuracy_guard_passed": bool(candidate.get("accuracy_guard_passed", True)),
+            "selection_reason": str(candidate.get("selection_reason", "")),
+            "selected_candidate": bool(candidate.get("selected_candidate", False)),
+            "hard_member_feasible": bool(candidate.get("hard_member_feasible", True)),
+            "planning_phase": str(candidate.get("planning_phase", "")),
+        }
 
     def _plan_with_signal(
         self,
         client_weights: Dict[int, List[np.ndarray]],
         client_sizes: Dict[int, int],
         probe_logits: Dict[int, np.ndarray],
+        probe_payload_bytes: Optional[Dict[int, int]],
         reason: str,
         planning_round: int,
     ) -> None:
         present_nodes = sorted(client_sizes.keys())
         gamma_t = self._gamma_at_cloud_round(planning_round)
         self.current_gamma_used = gamma_t
+        planning_phase = self._planning_phase(planning_round)
+        planning_objective_active = self._planning_objective_active(planning_round)
 
         warm_start_edges = (
             set(self.selected_edges)
@@ -1593,11 +2417,23 @@ class RoSEHFLStrategy(ShapeFlStrategy):
         class_distributions: Dict[int, np.ndarray] = {}
         self.current_hybrid_info = {}
         fill_penalty = self._effective_edge_underfill_penalty()
+        planning_probe_logits = (
+            probe_logits
+            if probe_logits
+            else dict(self._latest_probe_logits)
+        )
+        planning_probe_payload_bytes = (
+            probe_payload_bytes
+            if probe_payload_bytes and any(int(value) > 0 for value in probe_payload_bytes.values())
+            else dict(self._latest_probe_payload_bytes)
+        )
         if self.planning_signal in {"shapley", "hybrid"}:
             if self.probe_loader is None or self.model_factory is None:
                 raise RuntimeError("RoSE planning requires probe_loader and model_factory")
-            class_distributions = self._extract_client_distributions(client_weights, probe_logits)
+            class_distributions = self._extract_client_distributions(client_weights, planning_probe_logits)
 
+        los_result = None
+        los_candidates = []
         if self.planning_signal == "shapley":
             phi_raw = compute_smc_shapley(
                 client_weights=client_weights,
@@ -1610,25 +2446,47 @@ class RoSEHFLStrategy(ShapeFlStrategy):
                 seed=self.seed + planning_round,
             )
             phi = normalise_shapley(phi_raw)
-            los_result = run_los_rose(
-                candidate_edges=present_nodes,
-                all_nodes=present_nodes,
-                communication_costs_ne=self.c_ne,
-                communication_costs_ec=self.c_ec,
-                phi=phi,
-                client_class_distributions=class_distributions,
-                data_sizes=client_sizes,
-                kappa_c=self.kappa_c,
-                gamma=gamma_t,
-                B_e=self.B_e,
-                T_max=self.T_max,
-                initial_edges=warm_start_edges,
-                initial_associations=warm_start_associations,
-                warm_start_threshold=self.warm_start_threshold,
-                edge_min_members=self.edge_min_members,
-                edge_underfill_penalty=fill_penalty,
-                verbose=False,
-            )
+            if planning_objective_active == "effective":
+                los_result, los_candidates = run_los_rose_candidates(
+                    candidate_edges=present_nodes,
+                    all_nodes=present_nodes,
+                    communication_costs_ne=self.c_ne,
+                    communication_costs_ec=self.c_ec,
+                    phi=phi,
+                    client_class_distributions=class_distributions,
+                    data_sizes=client_sizes,
+                    kappa_c=self.kappa_c,
+                    gamma=gamma_t,
+                    B_e=self.B_e,
+                    T_max=self.T_max,
+                    initial_edges=warm_start_edges,
+                    initial_associations=warm_start_associations,
+                    warm_start_threshold=self.warm_start_threshold,
+                    edge_min_members=self.edge_min_members,
+                    edge_underfill_penalty=fill_penalty,
+                    max_candidates=self._planning_candidate_pool_size,
+                    verbose=False,
+                )
+            else:
+                los_result = run_los_rose(
+                    candidate_edges=present_nodes,
+                    all_nodes=present_nodes,
+                    communication_costs_ne=self.c_ne,
+                    communication_costs_ec=self.c_ec,
+                    phi=phi,
+                    client_class_distributions=class_distributions,
+                    data_sizes=client_sizes,
+                    kappa_c=self.kappa_c,
+                    gamma=gamma_t,
+                    B_e=self.B_e,
+                    T_max=self.T_max,
+                    initial_edges=warm_start_edges,
+                    initial_associations=warm_start_associations,
+                    warm_start_threshold=self.warm_start_threshold,
+                    edge_min_members=self.edge_min_members,
+                    edge_underfill_penalty=fill_penalty,
+                    verbose=False,
+                )
             self.current_phi_raw = {int(node_id): float(value) for node_id, value in phi_raw.items()}
             self.current_phi = {int(node_id): float(value) for node_id, value in phi.items()}
             self.current_client_distributions = class_distributions
@@ -1636,10 +2494,12 @@ class RoSEHFLStrategy(ShapeFlStrategy):
                 "cloud_round": int(planning_round),
                 "reason": reason,
                 "planning_signal": "shapley",
+                "planning_objective": self.planning_objective,
+                "planning_objective_active": planning_objective_active,
+                "planning_phase": planning_phase,
                 "gamma_t": float(gamma_t),
                 "phi_raw": self.current_phi_raw,
                 "phi": self.current_phi,
-                "objective_value": float(los_result.objective_value),
             }
         elif self.planning_signal == "hybrid":
             phi, hybrid_info = compute_hybrid_phi(
@@ -1649,7 +2509,7 @@ class RoSEHFLStrategy(ShapeFlStrategy):
                 model_factory=self.model_factory,
                 device=self.server_device,
                 reference_weights=self._current_cycle_reference_weights,
-                probe_logits=probe_logits,
+                probe_logits=planning_probe_logits,
                 probe_targets=self.probe_targets,
                 T=self.shapley_T,
                 K=self.shapley_K,
@@ -1668,34 +2528,58 @@ class RoSEHFLStrategy(ShapeFlStrategy):
                 )
                 for key, value in hybrid_info.items()
             }
-            los_result = run_los_rose(
-                candidate_edges=present_nodes,
-                all_nodes=present_nodes,
-                communication_costs_ne=self.c_ne,
-                communication_costs_ec=self.c_ec,
-                phi=self.current_phi,
-                client_class_distributions=class_distributions,
-                data_sizes=client_sizes,
-                kappa_c=self.kappa_c,
-                gamma=gamma_t,
-                B_e=self.B_e,
-                T_max=self.T_max,
-                initial_edges=warm_start_edges,
-                initial_associations=warm_start_associations,
-                warm_start_threshold=self.warm_start_threshold,
-                edge_min_members=self.edge_min_members,
-                edge_underfill_penalty=fill_penalty,
-                verbose=False,
-            )
+            if planning_objective_active == "effective":
+                los_result, los_candidates = run_los_rose_candidates(
+                    candidate_edges=present_nodes,
+                    all_nodes=present_nodes,
+                    communication_costs_ne=self.c_ne,
+                    communication_costs_ec=self.c_ec,
+                    phi=self.current_phi,
+                    client_class_distributions=class_distributions,
+                    data_sizes=client_sizes,
+                    kappa_c=self.kappa_c,
+                    gamma=gamma_t,
+                    B_e=self.B_e,
+                    T_max=self.T_max,
+                    initial_edges=warm_start_edges,
+                    initial_associations=warm_start_associations,
+                    warm_start_threshold=self.warm_start_threshold,
+                    edge_min_members=self.edge_min_members,
+                    edge_underfill_penalty=fill_penalty,
+                    max_candidates=self._planning_candidate_pool_size,
+                    verbose=False,
+                )
+            else:
+                los_result = run_los_rose(
+                    candidate_edges=present_nodes,
+                    all_nodes=present_nodes,
+                    communication_costs_ne=self.c_ne,
+                    communication_costs_ec=self.c_ec,
+                    phi=self.current_phi,
+                    client_class_distributions=class_distributions,
+                    data_sizes=client_sizes,
+                    kappa_c=self.kappa_c,
+                    gamma=gamma_t,
+                    B_e=self.B_e,
+                    T_max=self.T_max,
+                    initial_edges=warm_start_edges,
+                    initial_associations=warm_start_associations,
+                    warm_start_threshold=self.warm_start_threshold,
+                    edge_min_members=self.edge_min_members,
+                    edge_underfill_penalty=fill_penalty,
+                    verbose=False,
+                )
             event = {
                 "cloud_round": int(planning_round),
                 "reason": reason,
                 "planning_signal": "hybrid",
+                "planning_objective": self.planning_objective,
+                "planning_objective_active": planning_objective_active,
+                "planning_phase": planning_phase,
                 "gamma_t": float(gamma_t),
                 "phi_raw": self.current_phi_raw,
                 "phi": self.current_phi,
                 "hybrid_info": self.current_hybrid_info,
-                "objective_value": float(los_result.objective_value),
             }
         else:
             linear_updates = self._linear_updates_from_weights(
@@ -1723,24 +2607,131 @@ class RoSEHFLStrategy(ShapeFlStrategy):
                 "cloud_round": int(planning_round),
                 "reason": reason,
                 "planning_signal": "cosine",
+                "planning_objective": self.planning_objective,
+                "planning_objective_active": planning_objective_active,
+                "planning_phase": planning_phase,
                 "gamma_t": float(gamma_t),
-                "objective_value": float(los_result.objective_value),
             }
 
-        candidate_edge_nodes = {
-            int(edge_id): [int(node_id) for node_id in sorted(nodes)]
-            for edge_id, nodes in los_result.node_associations.edge_nodes.items()
-        }
-        candidate_cost = self._estimate_plan_cost_gb(candidate_edge_nodes)
-        cost_cap_triggered = (
-            reason.startswith("drift@")
-            and self.per_round_cost_gb > 0.0
-            and candidate_cost > self.per_round_cost_gb * (1.0 + self.replan_cost_increase_tolerance)
-        )
-        if not cost_cap_triggered or not self.selected_edges:
-            self._apply_los_result(los_result)
-        event["cost_cap_triggered"] = bool(cost_cap_triggered)
-        event["candidate_per_round_cost_gb"] = float(candidate_cost)
+        if los_result is None:
+            raise RuntimeError("RoSE planning produced no feasible topology candidate")
+
+        chosen_candidate = None
+        if planning_objective_active == "effective":
+            if self.model_factory is None or self.probe_loader is None:
+                raise RuntimeError("Effective planning requires probe_loader and model_factory")
+
+            raw_candidates: List[Dict[str, object]] = []
+            if los_candidates:
+                raw_candidates.extend(
+                    self._candidate_from_los_result(candidate_result, source=f"planner_{index}")
+                    for index, candidate_result in enumerate(los_candidates)
+                )
+            else:
+                raw_candidates.append(
+                    self._candidate_from_los_result(los_result, source="planner_0")
+                )
+
+            current_candidate = self._current_plan_candidate()
+            if current_candidate is not None:
+                raw_candidates.insert(0, current_candidate)
+
+            deduped_candidates: Dict[Tuple[Tuple[int, ...], Tuple[Tuple[int, int], ...]], Dict[str, object]] = {}
+            for candidate in raw_candidates:
+                key = (
+                    tuple(sorted(int(edge_id) for edge_id in candidate["selected_edges"])),
+                    tuple(
+                        sorted(
+                            (int(node_id), int(edge_id))
+                            for node_id, edge_id in candidate["node_edge"].items()
+                        )
+                    ),
+                )
+                existing = deduped_candidates.get(key)
+                if existing is None:
+                    deduped_candidates[key] = candidate
+                    continue
+                if existing.get("source") == "current":
+                    continue
+                if candidate.get("source") == "current":
+                    deduped_candidates[key] = candidate
+                    continue
+                if float(candidate.get("objective_value", float("inf"))) < float(
+                    existing.get("objective_value", float("inf"))
+                ):
+                    deduped_candidates[key] = candidate
+
+            current_probe_accuracy = float(
+                evaluate_on_probe(
+                    parameters_to_ndarrays(self.global_parameters),
+                    self.model_factory,
+                    self.probe_loader,
+                    self.server_device,
+                )
+            )
+            evaluated_candidates = [
+                self._evaluate_candidate_plan(
+                    candidate=candidate,
+                    client_weights=client_weights,
+                    client_sizes=client_sizes,
+                    probe_payload_bytes=planning_probe_payload_bytes,
+                    current_probe_accuracy=current_probe_accuracy,
+                    planning_round=planning_round,
+                )
+                for candidate in deduped_candidates.values()
+            ]
+            chosen_candidate, evaluated_candidates = self._select_effective_candidate(
+                evaluated_candidates,
+                planning_round=planning_round,
+            )
+            self._commit_plan_candidate(chosen_candidate)
+            event["current_probe_accuracy"] = float(current_probe_accuracy)
+            event["accuracy_guard_tolerance"] = float(self.accuracy_guard_tolerance)
+            event["effective_accuracy_delta"] = float(self.effective_accuracy_delta)
+            event["target_accuracy"] = (
+                None if self.target_accuracy is None else float(self.target_accuracy)
+            )
+            event["candidate_evaluations"] = [
+                self._serialise_candidate_evaluation(candidate)
+                for candidate in sorted(
+                    evaluated_candidates,
+                    key=lambda candidate: (
+                        float(candidate.get("planning_score_gb", float("inf"))),
+                        -float(candidate.get("simulated_probe_accuracy", float("-inf"))),
+                    ),
+                )
+            ]
+            event["objective_value"] = float(chosen_candidate["objective_value"])
+            event["cost_cap_triggered"] = False
+            event["candidate_per_round_cost_gb"] = float(chosen_candidate["paper_per_round_cost_gb"])
+            event["candidate_effective_per_round_cost_gb"] = float(
+                chosen_candidate["effective_per_round_cost_gb"]
+            )
+            event["candidate_change_cost_gb"] = float(chosen_candidate["change_cost_gb"])
+            event["candidate_planning_score_gb"] = float(chosen_candidate["planning_score_gb"])
+            event["candidate_projected_remaining_rounds"] = int(
+                chosen_candidate["projected_remaining_rounds"]
+            )
+            event["selected_source"] = str(chosen_candidate.get("source", ""))
+            event["selected_probe_accuracy"] = float(
+                chosen_candidate["simulated_probe_accuracy"]
+            )
+        else:
+            candidate_plan = self._candidate_from_los_result(los_result, source="planner_0")
+            candidate_cost = self._estimate_plan_cost_gb(candidate_plan["edge_nodes"])
+            cost_cap_triggered = (
+                reason.startswith("drift@")
+                and self.per_round_cost_gb > 0.0
+                and candidate_cost > self.per_round_cost_gb * (1.0 + self.replan_cost_increase_tolerance)
+            )
+            if not cost_cap_triggered or not self.selected_edges:
+                self._commit_plan_candidate(candidate_plan)
+                chosen_candidate = candidate_plan
+            else:
+                chosen_candidate = self._current_plan_candidate()
+            event["objective_value"] = float(los_result.objective_value)
+            event["cost_cap_triggered"] = bool(cost_cap_triggered)
+            event["candidate_per_round_cost_gb"] = float(candidate_cost)
 
         self.current_edge_balance_deficit = self._compute_edge_balance_deficit(
             self.edge_nodes,
@@ -1762,12 +2753,15 @@ class RoSEHFLStrategy(ShapeFlStrategy):
         event["edge_balance_deficit"] = float(self.current_edge_balance_deficit)
         event["gamma_next"] = float(self.current_gamma)
         event["edge_min_members"] = int(self.edge_min_members)
+        event["hard_edge_min_members"] = int(self.hard_edge_min_members)
         event["edge_underfill_penalty"] = float(fill_penalty)
         event["selected_edges"] = sorted(int(edge_id) for edge_id in self.selected_edges)
         event["edge_nodes"] = {
             str(edge_id): sorted(int(node_id) for node_id in nodes)
             for edge_id, nodes in self.edge_nodes.items()
         }
+        if chosen_candidate is not None:
+            event["selected_plan_source"] = str(chosen_candidate.get("source", ""))
         self.shapley_history.append(event)
         self.plan_history.append(event)
 
@@ -1788,13 +2782,12 @@ class RoSEHFLStrategy(ShapeFlStrategy):
             self._current_cycle_reference_weights = self._weights_copy(
                 parameters_to_ndarrays(self.global_parameters)
             )
-            emit_probe_logits = bool(self.emit_probe_logits and self.planning_signal in {"shapley", "hybrid"})
             config = {
                 "phase": "warmup",
                 "epochs": self.warmup_epochs,
                 "lr": self.lr,
                 "momentum": self.momentum,
-                "emit_probe_logits": emit_probe_logits,
+                "emit_probe_logits": self._should_emit_probe_logits(),
                 "dp_epsilon": self.dp_epsilon,
                 "dp_delta": self.dp_delta,
                 "probe_noise_seed": self.seed + self.completed_flower_rounds,
@@ -1828,7 +2821,7 @@ class RoSEHFLStrategy(ShapeFlStrategy):
             "epochs": epochs_this_round,
             "lr": self.lr,
             "momentum": self.momentum,
-            "emit_probe_logits": bool(self.emit_probe_logits and self.planning_signal in {"shapley", "hybrid"}),
+            "emit_probe_logits": self._should_emit_probe_logits(),
             "dp_epsilon": self.dp_epsilon,
             "dp_delta": self.dp_delta,
             "probe_noise_seed": self.seed + self.completed_flower_rounds,
@@ -1876,7 +2869,7 @@ class RoSEHFLStrategy(ShapeFlStrategy):
             topology=self.topology,
         )
 
-        client_weights, client_sizes, probe_logits, _, _ = self._collect_client_state(results)
+        client_weights, client_sizes, probe_logits, _, probe_payload_bytes = self._collect_client_state(results)
         warmup_global = _weighted_average(
             list(client_weights.values()),
             list(client_sizes.values()),
@@ -1891,6 +2884,7 @@ class RoSEHFLStrategy(ShapeFlStrategy):
             client_weights=client_weights,
             client_sizes=client_sizes,
             probe_logits=probe_logits,
+            probe_payload_bytes=probe_payload_bytes,
             reason="warmup",
             planning_round=0,
         )
@@ -1926,9 +2920,23 @@ class RoSEHFLStrategy(ShapeFlStrategy):
                 self.model_size_bytes,
             )
 
-        compress_this_cycle = self.compression_enabled and self.cloud_round >= 1
-        node_keep_ratio = self._compression_keep_ratio(edge_to_cloud=False)
-        edge_keep_ratio = self._compression_keep_ratio(edge_to_cloud=True)
+        cycle_cloud_round = self._current_cycle_cloud_round()
+        compress_clients_this_cycle = self._compression_enabled_for_cycle(
+            edge_to_cloud=False,
+            cycle_cloud_round=cycle_cloud_round,
+        )
+        compress_edges_this_cycle = self._compression_enabled_for_cycle(
+            edge_to_cloud=True,
+            cycle_cloud_round=cycle_cloud_round,
+        )
+        node_keep_ratio = self._compression_keep_ratio(
+            edge_to_cloud=False,
+            cycle_cloud_round=cycle_cloud_round,
+        )
+        edge_keep_ratio = self._compression_keep_ratio(
+            edge_to_cloud=True,
+            cycle_cloud_round=cycle_cloud_round,
+        )
 
         edge_groups: Dict[int, Dict[str, object]] = defaultdict(
             lambda: {"weights": [], "sizes": [], "nodes": [], "payload_bytes": []}
@@ -1946,7 +2954,7 @@ class RoSEHFLStrategy(ShapeFlStrategy):
 
             transmitted_weights = self._weights_copy(weights)
             payload_bytes = self.model_size_bytes
-            if compress_this_cycle:
+            if compress_clients_this_cycle:
                 compression = compress_weight_update(
                     reference_weights=reference_weights,
                     target_weights=weights,
@@ -2013,7 +3021,9 @@ class RoSEHFLStrategy(ShapeFlStrategy):
                 serialisable_info["trust_scores"] = [float(value) for value in info["trust_scores"]]
             serialisable_info["swa_buffer_size"] = int(len(self.edge_swa_buffers.get(int(edge_id), [])))
             serialisable_info["model_payload_bytes"] = int(sum(group["payload_bytes"]))
-            serialisable_info["compression_keep_ratio"] = float(node_keep_ratio if compress_this_cycle else 1.0)
+            serialisable_info["compression_keep_ratio"] = float(
+                node_keep_ratio if compress_clients_this_cycle else 1.0
+            )
             edge_summary[str(edge_id)] = serialisable_info
 
         self.edge_aggregation_history.append(edge_summary)
@@ -2044,7 +3054,7 @@ class RoSEHFLStrategy(ShapeFlStrategy):
             )
             transmitted_edge_weights = self._weights_copy(edge_weights_current)
             payload_bytes = self.model_size_bytes
-            if compress_this_cycle and self.compress_edge_to_cloud:
+            if compress_edges_this_cycle and self.compress_edge_to_cloud:
                 compression = compress_weight_update(
                     reference_weights=global_reference_weights,
                     target_weights=edge_weights_current,
@@ -2071,7 +3081,7 @@ class RoSEHFLStrategy(ShapeFlStrategy):
             edge_summary.setdefault(str(edge_id), {})
             edge_summary[str(edge_id)]["edge_to_cloud_payload_bytes"] = int(payload_bytes)
             edge_summary[str(edge_id)]["edge_to_cloud_keep_ratio"] = float(
-                edge_keep_ratio if (compress_this_cycle and self.compress_edge_to_cloud) else 1.0
+                edge_keep_ratio if (compress_edges_this_cycle and self.compress_edge_to_cloud) else 1.0
             )
 
         if edge_weights:
@@ -2079,6 +3089,11 @@ class RoSEHFLStrategy(ShapeFlStrategy):
             global_average = self._mask_batch_norm_weights(
                 global_average,
                 parameters_to_ndarrays(self.global_parameters),
+            )
+            global_average = self._apply_server_optimizer(
+                reference_weights=global_reference_weights,
+                aggregated_weights=global_average,
+                update_state=True,
             )
             self.global_parameters = ndarrays_to_parameters(global_average)
 
@@ -2110,7 +3125,14 @@ class RoSEHFLStrategy(ShapeFlStrategy):
             )
 
         replanned = False
-        if triggered_edges and self.replan_count < self.max_replans:
+        replan_reason = self._stage_replan_reason(self.cloud_round)
+        if triggered_edges:
+            drift_reason = f"drift@{self.cloud_round}"
+            replan_reason = (
+                f"{replan_reason}+{drift_reason}" if replan_reason is not None else drift_reason
+            )
+
+        if replan_reason and self.replan_count < self.max_replans:
             previous_assignments = dict(self.node_edge)
             self.replan_count += 1
             self.replan_rounds.append(self.cloud_round)
@@ -2118,7 +3140,8 @@ class RoSEHFLStrategy(ShapeFlStrategy):
                 client_weights=client_weights,
                 client_sizes=client_sizes,
                 probe_logits=probe_logits,
-                reason=f"drift@{self.cloud_round}",
+                probe_payload_bytes=probe_payload_bytes,
+                reason=replan_reason,
                 planning_round=self.cloud_round,
             )
             replanned = previous_assignments != self.node_edge

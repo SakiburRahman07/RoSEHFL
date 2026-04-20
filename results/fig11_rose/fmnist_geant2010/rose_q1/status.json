@@ -1,0 +1,10 @@
+{
+  "completed": true,
+  "phase": "train",
+  "cloud_round": 10,
+  "edge_epoch": 0,
+  "completed_flower_rounds": 51,
+  "completed_local_epochs": 51,
+  "remaining_flower_rounds": 0,
+  "replan_count": 1
+}

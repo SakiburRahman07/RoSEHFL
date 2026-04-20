@@ -32,7 +32,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", type=str, default="lenet5", choices=["lenet5", "mobilenetv2", "resnet18"])
     parser.add_argument("--dataset", type=str, default="fmnist", choices=["fmnist", "cifar10", "cifar100"])
     parser.add_argument("--num-nodes", type=int, default=30)
-    parser.add_argument("--method", type=str, default="rose", choices=["rose", "roseplusplus", "rose_q1"])
+    parser.add_argument(
+        "--method",
+        type=str,
+        default="rose",
+        choices=["rose", "roseplusplus", "rose_q1", "rose_q1s", "rose_effective"],
+    )
 
     parser.add_argument("--warmup-epochs", type=int, default=1)
     parser.add_argument("--kappa-e", type=int, default=1)
@@ -43,9 +48,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gamma-anneal", type=str, default="cosine", choices=["fixed", "linear", "cosine", "adaptive"])
     parser.add_argument("--B-e", type=int, default=None)
     parser.add_argument("--T-max", type=int, default=30)
+    parser.add_argument("--target-accuracy", type=float, default=None)
 
     parser.add_argument("--lr", type=float, default=0.001)
     parser.add_argument("--momentum", type=float, default=0.0)
+    parser.add_argument("--fedprox-mu", type=float, default=0.01)
     parser.add_argument("--batch-size", type=int, default=32)
 
     parser.add_argument("--shard-size", type=int, default=15)
@@ -117,6 +124,12 @@ def run_rose_experiment(args) -> dict:
 
     if args.B_e is None:
         args.B_e = max(3, math.ceil(args.num_nodes / 3))
+    if args.target_accuracy is None:
+        args.target_accuracy = {
+            "fmnist": 0.70,
+            "cifar10": 0.40,
+            "cifar100": 0.20,
+        }[args.dataset]
 
     strategy_kwargs = dict(
         model_name=args.model,
@@ -170,7 +183,7 @@ def run_rose_experiment(args) -> dict:
             warm_start_replan=True,
             warm_start_threshold=0.05,
             replan_cost_increase_tolerance=0.1,
-            local_objective_prox_mu=0.01,
+            local_objective_prox_mu=args.fedprox_mu,
             logit_adjustment_tau=1.0,
             local_bn=True,
             edge_swa_k=3,
@@ -199,10 +212,87 @@ def run_rose_experiment(args) -> dict:
             compress_edge_to_cloud=not args.disable_edge_to_cloud_compression,
             edge_min_members=args.edge_min_members,
             edge_underfill_penalty=edge_underfill_penalty,
-            local_objective_prox_mu=0.01,
+            local_objective_prox_mu=args.fedprox_mu,
             logit_adjustment_tau=1.0,
             local_bn=True,
             edge_swa_k=3,
+        )
+    elif args.method == "rose_q1s":
+        edge_underfill_penalty = (
+            -1.0 if args.edge_underfill_penalty is None else float(args.edge_underfill_penalty)
+        )
+        strategy_kwargs.update(
+            warmup_epochs=3,
+            gamma_min=1400.0,
+            gamma_anneal="adaptive",
+            planning_signal="hybrid",
+            shapley_T=2,
+            shapley_K=64,
+            trust_use_shrinkage=True,
+            adaptive_gamma_eta=0.5,
+            adaptive_gamma_target=0.25,
+            warm_start_replan=True,
+            warm_start_threshold=0.05,
+            replan_cost_increase_tolerance=0.1,
+            compression_enabled=True,
+            compression_keep_ratio_min=0.15,
+            compression_keep_ratio_max=0.30,
+            compression_eta=args.compression_eta,
+            compression_target_deficit=args.compression_target_deficit,
+            compress_edge_to_cloud=not args.disable_edge_to_cloud_compression,
+            edge_min_members=max(args.edge_min_members, 3),
+            edge_underfill_penalty=edge_underfill_penalty,
+            local_objective_prox_mu=args.fedprox_mu,
+            logit_adjustment_tau=1.0,
+            local_bn=True,
+            edge_swa_k=3,
+            planning_objective="effective",
+            target_accuracy=args.target_accuracy,
+            accuracy_guard_tolerance=0.02,
+            effective_planning_start_cloud_round=3,
+            late_phase_start_fraction=0.8,
+            effective_accuracy_delta=0.01,
+            probe_emit_mode="cycle_start",
+            client_compression_start_cloud_round=3,
+            edge_compression_start_cloud_round=4,
+            server_optimizer="fedadam",
+            server_lr=0.03,
+            server_beta1=0.9,
+            server_beta2=0.99,
+            server_tau=1e-3,
+            hard_edge_min_members=3,
+        )
+    elif args.method == "rose_effective":
+        edge_underfill_penalty = (
+            -1.0 if args.edge_underfill_penalty is None else float(args.edge_underfill_penalty)
+        )
+        strategy_kwargs.update(
+            gamma_min=1400.0,
+            gamma_anneal="adaptive",
+            planning_signal="hybrid",
+            shapley_T=1,
+            shapley_K=64,
+            trust_use_shrinkage=True,
+            adaptive_gamma_eta=0.5,
+            adaptive_gamma_target=0.25,
+            warm_start_replan=True,
+            warm_start_threshold=0.05,
+            replan_cost_increase_tolerance=0.1,
+            compression_enabled=True,
+            compression_keep_ratio_min=args.compression_keep_ratio_min,
+            compression_keep_ratio_max=args.compression_keep_ratio_max,
+            compression_eta=args.compression_eta,
+            compression_target_deficit=args.compression_target_deficit,
+            compress_edge_to_cloud=not args.disable_edge_to_cloud_compression,
+            edge_min_members=args.edge_min_members,
+            edge_underfill_penalty=edge_underfill_penalty,
+            local_objective_prox_mu=args.fedprox_mu,
+            logit_adjustment_tau=1.0,
+            local_bn=True,
+            edge_swa_k=3,
+            planning_objective="effective",
+            target_accuracy=args.target_accuracy,
+            accuracy_guard_tolerance=0.02,
         )
     strategy = RoSEHFLStrategy(**strategy_kwargs)
 

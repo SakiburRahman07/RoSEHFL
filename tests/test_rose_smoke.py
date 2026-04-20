@@ -87,12 +87,12 @@ class RoSESmokeTests(unittest.TestCase):
                 model_name="lenet5",
                 dataset_name="fmnist",
                 num_nodes=3,
-                warmup_epochs=1,
+                warmup_epochs=3,
                 kappa_e=1,
                 kappa_c=1,
-                kappa=2,
+                kappa=4,
                 gamma_max=10.0,
-                B_e=2,
+                B_e=3,
                 T_max=3,
                 lr=0.01,
                 momentum=0.0,
@@ -109,6 +109,21 @@ class RoSESmokeTests(unittest.TestCase):
                 shapley_K=2,
                 probe_size=8,
                 compression_enabled=True,
+                planning_objective="effective",
+                target_accuracy=0.4,
+                accuracy_guard_tolerance=0.02,
+                effective_planning_start_cloud_round=3,
+                late_phase_start_fraction=0.8,
+                effective_accuracy_delta=0.01,
+                probe_emit_mode="cycle_start",
+                client_compression_start_cloud_round=3,
+                edge_compression_start_cloud_round=4,
+                server_optimizer="fedadam",
+                server_lr=0.03,
+                server_beta1=0.9,
+                server_beta2=0.99,
+                server_tau=1e-3,
+                hard_edge_min_members=3,
             )
 
             fl.simulation.start_simulation(
@@ -131,12 +146,12 @@ class RoSESmokeTests(unittest.TestCase):
                 model_name="lenet5",
                 dataset_name="fmnist",
                 num_nodes=3,
-                warmup_epochs=1,
+                warmup_epochs=3,
                 kappa_e=1,
                 kappa_c=1,
-                kappa=2,
+                kappa=4,
                 gamma_max=10.0,
-                B_e=2,
+                B_e=3,
                 T_max=3,
                 lr=0.01,
                 momentum=0.0,
@@ -153,9 +168,24 @@ class RoSESmokeTests(unittest.TestCase):
                 shapley_K=2,
                 probe_size=8,
                 compression_enabled=True,
+                planning_objective="effective",
+                target_accuracy=0.4,
+                accuracy_guard_tolerance=0.02,
+                effective_planning_start_cloud_round=3,
+                late_phase_start_fraction=0.8,
+                effective_accuracy_delta=0.01,
+                probe_emit_mode="cycle_start",
+                client_compression_start_cloud_round=3,
+                edge_compression_start_cloud_round=4,
+                server_optimizer="fedadam",
+                server_lr=0.03,
+                server_beta1=0.9,
+                server_beta2=0.99,
+                server_tau=1e-3,
+                hard_edge_min_members=3,
             )
             resumed.load_checkpoint_state(checkpoint)
-            self.assertEqual(resumed.remaining_flower_rounds, 2)
+            self.assertEqual(resumed.remaining_flower_rounds, 4)
 
             fl.simulation.start_simulation(
                 client_fn=client_fn,
@@ -188,6 +218,33 @@ class RoSESmokeTests(unittest.TestCase):
                 metrics["effective_per_round_cost_gb"][-1],
                 metrics["paper_per_round_cost_gb"][-1],
             )
+
+            with open(os.path.join(tmpdir, "plan.json"), "r", encoding="utf-8") as handle:
+                plan = json.load(handle)
+            self.assertEqual(plan["planning_objective"], "effective")
+            self.assertAlmostEqual(float(plan["accuracy_guard_tolerance"]), 0.02, places=6)
+            self.assertEqual(int(plan["effective_planning_start_cloud_round"]), 3)
+            self.assertEqual(plan["probe_emit_mode"], "cycle_start")
+            self.assertEqual(plan["server_optimizer"], "fedadam")
+            self.assertEqual(int(plan["hard_edge_min_members"]), 3)
+            self.assertTrue(plan["plan_history"])
+            first_event = plan["plan_history"][0]
+            self.assertEqual(first_event["planning_objective"], "effective")
+            self.assertEqual(first_event["planning_objective_active"], "paper")
+            effective_events = [
+                event for event in plan["plan_history"]
+                if event.get("planning_objective_active") == "effective"
+            ]
+            self.assertTrue(effective_events)
+            self.assertTrue(any(event.get("candidate_evaluations") for event in effective_events))
+            self.assertTrue(any("selected_plan_source" in event for event in effective_events))
+
+            with open(os.path.join(tmpdir, "privacy.json"), "r", encoding="utf-8") as handle:
+                privacy = json.load(handle)
+            self.assertEqual(privacy["probe_emit_mode"], "cycle_start")
+            self.assertEqual(int(privacy["client_compression_start_cloud_round"]), 3)
+            self.assertEqual(int(privacy["edge_compression_start_cloud_round"]), 4)
+            self.assertEqual(privacy["server_optimizer"], "fedadam")
 
 
 if __name__ == "__main__":
