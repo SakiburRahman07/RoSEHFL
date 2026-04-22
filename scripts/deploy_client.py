@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ShapeFL Computing Node — Flower Deployment
+RoSEHFL Computing Node - Flower Deployment ( Based on The original ShapeFL Client )
 ============================================
 Runs a Flower client on a computing node and connects to the cloud server.
 
@@ -16,18 +16,20 @@ import torch
 from torch.utils.data import DataLoader
 import flwr as fl
 
-from shapefl.models.factory import get_model
-from shapefl.data.data_loader import (
+from rosehfl.models.factory import get_model
+from rosehfl.data.data_loader import (
     load_data,
     get_node_dataloader,
     create_non_iid_partitions,
+    get_partition_label_counts,
     DATASET_INFO,
 )
-from shapefl.client import ShapeFlClient
+from rosehfl.client import FlClient
+from rosehfl.utils.shapley import build_probe_set
 
 
-def _load_partition(args):
-    """Load data partition for this node."""
+def _load_partition_context(args):
+    """Load the local train/eval partition and probe context for this node."""
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     partitions_file = os.path.join(project_root, "partitions", "partitions.json")
 
@@ -48,12 +50,31 @@ def _load_partition(args):
 
     train_loader = get_node_dataloader(train_dataset, partition, args.batch_size)
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False)
-    return train_loader, test_loader
+    label_counts = get_partition_label_counts(
+        train_dataset,
+        {int(node_id): indices for node_id, indices in partitions.items()},
+        DATASET_INFO[args.dataset]["num_classes"],
+    )
+    class_prior = None
+    if args.node_id in label_counts:
+        counts = label_counts[args.node_id].astype("float32")
+        total = float(counts.sum())
+        if total > 0.0:
+            class_prior = counts / total
+
+    probe_subset = build_probe_set(
+        test_dataset=test_dataset,
+        probe_size=args.probe_size,
+        num_classes=DATASET_INFO[args.dataset]["num_classes"],
+        seed=args.seed,
+    )
+    probe_loader = DataLoader(probe_subset, batch_size=args.batch_size, shuffle=False)
+    return train_loader, test_loader, probe_loader, class_prior
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="ShapeFL Computing Node (Flower client)",
+        description="RoSEHFL Computing Node (Flower client)",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--node-id", type=int, required=True)
@@ -64,6 +85,7 @@ def main():
                         choices=["fmnist", "cifar10", "cifar100"])
     parser.add_argument("--num-nodes", type=int, default=30)
     parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--probe-size", type=int, default=1000)
     parser.add_argument("--shard-size", type=int, default=15)
     parser.add_argument("--shards-per-node", type=int, default=None,
                         help="Shards per node (default: from dataset config).")
@@ -93,10 +115,19 @@ def main():
     ds_info = DATASET_INFO[args.dataset]
     model = get_model(args.model, ds_info["num_classes"], ds_info["input_channels"], device)
 
-    train_loader, test_loader = _load_partition(args)
+    train_loader, test_loader, probe_loader, class_prior = _load_partition_context(args)
     print(f"  Partition loaded: {len(train_loader.dataset)} train samples")
 
-    client = ShapeFlClient(model, train_loader, test_loader, device)
+    client = FlClient(
+        model=model,
+        train_loader=train_loader,
+        test_loader=test_loader,
+        device=device,
+        node_id=args.node_id,
+        probe_loader=probe_loader,
+        seed=args.seed + args.node_id,
+        class_prior=class_prior,
+    )
 
     fl.client.start_client(
         server_address=args.server_address,

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ShapeFL Flower Strategy Comparison
+Flower Strategy Comparison
 ===================================
 Compare ShapeFL, SHARE, Cost First, Data First, Random, FedAvg, and FedProx strategies.
 Reproduces paper Fig. 11.
@@ -23,22 +23,22 @@ import flwr as fl
 from flwr.common import ndarrays_to_parameters
 from torch.utils.data import DataLoader
 
-from shapefl.models.factory import get_model, get_model_size
-from shapefl.data.data_loader import (
+from rosehfl.models.factory import get_model, get_model_size
+from rosehfl.data.data_loader import (
     load_data,
     create_non_iid_partitions,
     get_partition_label_counts,
     DATASET_INFO,
 )
-from shapefl.client import client_fn_factory
-from shapefl.strategy import (
+from rosehfl.client import client_fn_factory
+from rosehfl.strategy import (
     ShapeFlStrategy,
     FedAvgFlatStrategy,
     FedProxFlatStrategy,
     generate_communication_costs,
 )
-from shapefl.utils.seed import set_seed
-from shapefl.utils.json_utils import NumpyEncoder
+from rosehfl.utils.seed import set_seed
+from rosehfl.utils.json_utils import NumpyEncoder
 
 
 def run_one_strategy(name, strategy, client_fn, num_nodes, seed):
@@ -320,7 +320,7 @@ def main():
 
     # ── Visualization ────────────────────────────────────────────────────
     try:
-        from shapefl.utils.visualization import visualize_comparison as viz_cmp
+        from rosehfl.utils.visualization import visualize_comparison as viz_cmp
         all_metrics_for_viz = {n: r["metrics"] for n, r in all_results.items()}
         viz_cmp(
             all_metrics=all_metrics_for_viz,

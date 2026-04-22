@@ -9,8 +9,8 @@ import argparse
 import math
 import os
 
-from shapefl.strategy import RoSEHFLStrategy, ShapeFlStrategy
-from shapefl.utils.seed import set_seed
+from rosehfl.strategy import RoSEHFLStrategy, ShapeFlStrategy
+from rosehfl.utils.seed import set_seed
 
 from ._rose_common import (
     prepare_shared_context,
@@ -306,7 +306,7 @@ def run_effective_comparison(args) -> dict:
     if args.no_augment:
         args.augment = False
 
-    from shapefl.data.data_loader import DATASET_INFO
+    from rosehfl.data.data_loader import DATASET_INFO
 
     ds_info = DATASET_INFO[args.dataset]
     if args.shards_per_node is None:

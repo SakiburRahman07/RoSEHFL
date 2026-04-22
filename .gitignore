@@ -12,3 +12,5 @@ metrics/
 !LICENSE.md
 !CLAUDE.md
 .claude/
+!paper*.md
+results/

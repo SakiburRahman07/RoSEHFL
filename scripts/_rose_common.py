@@ -16,20 +16,20 @@ import torch
 from flwr.common import ndarrays_to_parameters, parameters_to_ndarrays
 from torch.utils.data import DataLoader
 
-from shapefl.client import client_fn_factory
-from shapefl.data.data_loader import (
+from rosehfl.client import client_fn_factory
+from rosehfl.data.data_loader import (
     DATASET_INFO,
     create_client_eval_partitions,
     create_non_iid_partitions,
     get_partition_label_counts,
     load_data,
 )
-from shapefl.models.factory import get_model, get_model_size
-from shapefl.utils.fairness import per_client_accuracy_from_weights, summarise_fairness
-from shapefl.utils.json_utils import NumpyEncoder, save_json
-from shapefl.utils.seed import set_seed
-from shapefl.utils.shapley import build_probe_set
-from shapefl.byzantine import select_byzantine_nodes
+from rosehfl.models.factory import get_model, get_model_size
+from rosehfl.utils.fairness import per_client_accuracy_from_weights, summarise_fairness
+from rosehfl.utils.json_utils import NumpyEncoder, save_json
+from rosehfl.utils.seed import set_seed
+from rosehfl.utils.shapley import build_probe_set
+from rosehfl.byzantine import select_byzantine_nodes
 
 
 def timestamped_dir(prefix: str) -> str:

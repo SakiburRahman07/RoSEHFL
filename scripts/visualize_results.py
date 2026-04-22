@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Visualize saved Flower-ShapeFL results
+Visualize saved results
 ========================================
 Re-generate all plots and HTML reports from an existing JSON results file
 without re-running the training.
@@ -16,7 +16,7 @@ import json
 import os
 import sys
 
-from shapefl.utils.visualization import (
+from rosehfl.utils.visualization import (
     visualize_simulation,
     visualize_comparison,
 )
@@ -40,7 +40,7 @@ def find_json(path: str) -> str:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Visualize Flower-ShapeFL results from a JSON file",
+        description="Visualize results from a JSON file",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("path", type=str, help="Path to results JSON file or directory")

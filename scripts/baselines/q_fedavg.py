@@ -8,7 +8,7 @@ from typing import Dict, Tuple
 
 from flwr.common import ndarrays_to_parameters, parameters_to_ndarrays
 
-from shapefl.strategy import FedAvgFlatStrategy, _weighted_average
+from rosehfl.strategy import FedAvgFlatStrategy, _weighted_average
 
 
 class QFedAvgFlatStrategy(FedAvgFlatStrategy):

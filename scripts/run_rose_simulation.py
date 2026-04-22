@@ -10,9 +10,7 @@ import math
 import os
 
 import torch
-
-from shapefl.strategy import RoSEHFLStrategy
-from shapefl.utils.seed import set_seed
+from rosehfl.utils.seed import set_seed
 
 from ._rose_common import (
     load_checkpoint_if_available,
@@ -22,6 +20,7 @@ from ._rose_common import (
     write_fairness_report,
     write_summary_json,
 )
+from ._strategy_factory import build_strategy, default_target_accuracy
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -125,176 +124,8 @@ def run_rose_experiment(args) -> dict:
     if args.B_e is None:
         args.B_e = max(3, math.ceil(args.num_nodes / 3))
     if args.target_accuracy is None:
-        args.target_accuracy = {
-            "fmnist": 0.70,
-            "cifar10": 0.40,
-            "cifar100": 0.20,
-        }[args.dataset]
-
-    strategy_kwargs = dict(
-        model_name=args.model,
-        dataset_name=args.dataset,
-        num_nodes=args.num_nodes,
-        warmup_epochs=args.warmup_epochs,
-        kappa_e=args.kappa_e,
-        kappa_c=args.kappa_c,
-        kappa=args.kappa,
-        gamma_max=args.gamma_max,
-        gamma_anneal=args.gamma_anneal,
-        B_e=args.B_e,
-        T_max=args.T_max,
-        lr=args.lr,
-        momentum=args.momentum,
-        initial_parameters=shared["initial_parameters"],
-        evaluate_fn=shared["evaluate_fn"],
-        topology=args.topology,
-        node_label_counts=shared["node_label_counts"],
-        total_local_epochs=args.total_local_epochs,
-        probe_loader=shared["probe_loader"],
-        model_factory=shared["model_factory"],
-        server_device=shared["server_device"],
-        output_dir=args.output_dir,
-        seed=args.seed,
-        shapley_T=args.shapley_T,
-        shapley_K=args.shapley_K,
-        planning_signal=args.planning_signal,
-        emit_probe_logits=True,
-        dp_epsilon=args.dp_epsilon,
-        dp_delta=args.dp_delta,
-        probe_size=args.probe_size,
-        agg_rule=args.agg_rule,
-        agg_trim_ratio=args.agg_trim_ratio,
-        krum_f=args.krum_f,
-        drift_enabled=not args.disable_drift,
-        drift_delta=args.drift_delta,
-        drift_lambda=args.drift_lambda,
-        max_replans=args.max_replans,
-    )
-    if args.method == "roseplusplus":
-        strategy_kwargs.update(
-            gamma_min=1400.0,
-            gamma_anneal="adaptive",
-            planning_signal="hybrid",
-            shapley_T=1,
-            shapley_K=64,
-            trust_use_shrinkage=True,
-            adaptive_gamma_eta=0.5,
-            adaptive_gamma_target=0.25,
-            warm_start_replan=True,
-            warm_start_threshold=0.05,
-            replan_cost_increase_tolerance=0.1,
-            local_objective_prox_mu=args.fedprox_mu,
-            logit_adjustment_tau=1.0,
-            local_bn=True,
-            edge_swa_k=3,
-        )
-    elif args.method == "rose_q1":
-        edge_underfill_penalty = (
-            -1.0 if args.edge_underfill_penalty is None else float(args.edge_underfill_penalty)
-        )
-        strategy_kwargs.update(
-            gamma_min=1400.0,
-            gamma_anneal="adaptive",
-            planning_signal="hybrid",
-            shapley_T=1,
-            shapley_K=64,
-            trust_use_shrinkage=True,
-            adaptive_gamma_eta=0.5,
-            adaptive_gamma_target=0.25,
-            warm_start_replan=True,
-            warm_start_threshold=0.05,
-            replan_cost_increase_tolerance=0.1,
-            compression_enabled=True,
-            compression_keep_ratio_min=args.compression_keep_ratio_min,
-            compression_keep_ratio_max=args.compression_keep_ratio_max,
-            compression_eta=args.compression_eta,
-            compression_target_deficit=args.compression_target_deficit,
-            compress_edge_to_cloud=not args.disable_edge_to_cloud_compression,
-            edge_min_members=args.edge_min_members,
-            edge_underfill_penalty=edge_underfill_penalty,
-            local_objective_prox_mu=args.fedprox_mu,
-            logit_adjustment_tau=1.0,
-            local_bn=True,
-            edge_swa_k=3,
-        )
-    elif args.method == "rose_q1s":
-        edge_underfill_penalty = (
-            -1.0 if args.edge_underfill_penalty is None else float(args.edge_underfill_penalty)
-        )
-        strategy_kwargs.update(
-            warmup_epochs=3,
-            gamma_min=1400.0,
-            gamma_anneal="adaptive",
-            planning_signal="hybrid",
-            shapley_T=2,
-            shapley_K=64,
-            trust_use_shrinkage=True,
-            adaptive_gamma_eta=0.5,
-            adaptive_gamma_target=0.25,
-            warm_start_replan=True,
-            warm_start_threshold=0.05,
-            replan_cost_increase_tolerance=0.1,
-            compression_enabled=True,
-            compression_keep_ratio_min=0.15,
-            compression_keep_ratio_max=0.30,
-            compression_eta=args.compression_eta,
-            compression_target_deficit=args.compression_target_deficit,
-            compress_edge_to_cloud=not args.disable_edge_to_cloud_compression,
-            edge_min_members=max(args.edge_min_members, 3),
-            edge_underfill_penalty=edge_underfill_penalty,
-            local_objective_prox_mu=args.fedprox_mu,
-            logit_adjustment_tau=1.0,
-            local_bn=True,
-            edge_swa_k=3,
-            planning_objective="effective",
-            target_accuracy=args.target_accuracy,
-            accuracy_guard_tolerance=0.02,
-            effective_planning_start_cloud_round=3,
-            late_phase_start_fraction=0.8,
-            effective_accuracy_delta=0.01,
-            probe_emit_mode="cycle_start",
-            client_compression_start_cloud_round=3,
-            edge_compression_start_cloud_round=4,
-            server_optimizer="fedadam",
-            server_lr=0.03,
-            server_beta1=0.9,
-            server_beta2=0.99,
-            server_tau=1e-3,
-            hard_edge_min_members=3,
-        )
-    elif args.method == "rose_effective":
-        edge_underfill_penalty = (
-            -1.0 if args.edge_underfill_penalty is None else float(args.edge_underfill_penalty)
-        )
-        strategy_kwargs.update(
-            gamma_min=1400.0,
-            gamma_anneal="adaptive",
-            planning_signal="hybrid",
-            shapley_T=1,
-            shapley_K=64,
-            trust_use_shrinkage=True,
-            adaptive_gamma_eta=0.5,
-            adaptive_gamma_target=0.25,
-            warm_start_replan=True,
-            warm_start_threshold=0.05,
-            replan_cost_increase_tolerance=0.1,
-            compression_enabled=True,
-            compression_keep_ratio_min=args.compression_keep_ratio_min,
-            compression_keep_ratio_max=args.compression_keep_ratio_max,
-            compression_eta=args.compression_eta,
-            compression_target_deficit=args.compression_target_deficit,
-            compress_edge_to_cloud=not args.disable_edge_to_cloud_compression,
-            edge_min_members=args.edge_min_members,
-            edge_underfill_penalty=edge_underfill_penalty,
-            local_objective_prox_mu=args.fedprox_mu,
-            logit_adjustment_tau=1.0,
-            local_bn=True,
-            edge_swa_k=3,
-            planning_objective="effective",
-            target_accuracy=args.target_accuracy,
-            accuracy_guard_tolerance=0.02,
-        )
-    strategy = RoSEHFLStrategy(**strategy_kwargs)
+        args.target_accuracy = default_target_accuracy(args.dataset)
+    strategy = build_strategy(args.method, args, shared, args.output_dir)
 
     if args.resume:
         checkpoint = load_checkpoint_if_available(args.output_dir)
@@ -371,7 +202,7 @@ def prepare_defaults(args):
 
 
 def prepare_dataset_defaults(args):
-    from shapefl.data.data_loader import DATASET_INFO
+    from rosehfl.data.data_loader import DATASET_INFO
 
     ds_info = DATASET_INFO[args.dataset]
     if args.shards_per_node is None:

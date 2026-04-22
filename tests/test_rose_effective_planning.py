@@ -5,7 +5,7 @@ from unittest.mock import patch
 import numpy as np
 from flwr.common import ndarrays_to_parameters, parameters_to_ndarrays
 
-from shapefl.strategy import RoSEHFLStrategy
+from rosehfl.strategy import RoSEHFLStrategy
 
 
 def _strategy(**overrides) -> RoSEHFLStrategy:
@@ -290,6 +290,33 @@ class RoSEQ1SPlanningTests(unittest.TestCase):
         strategy.edge_epoch = 1
         self.assertFalse(strategy._should_emit_probe_logits())
 
+    def test_probe_payload_cost_uses_client_edge_and_edge_cloud_links(self):
+        strategy = _strategy()
+        strategy.model_size_bytes = 100
+        strategy.c_ne = {
+            (0, 0): 1.0,
+            (1, 0): 1.5,
+            (2, 1): 2.0,
+        }
+        strategy.c_ec = {
+            0: 10.0,
+            1: 20.0,
+        }
+
+        effective_cost = strategy._effective_probe_payload_cost(
+            probe_payload_bytes={0: 10, 1: 20, 2: 30},
+            node_edge_map={0: 0, 1: 0, 2: 1},
+        )
+
+        expected = (
+            1.0 * (10 / 100)
+            + 1.5 * (20 / 100)
+            + 2.0 * (30 / 100)
+            + 10.0 * (30 / 100)
+            + 20.0 * (30 / 100)
+        )
+        self.assertAlmostEqual(effective_cost, expected, places=8)
+
     def test_stage_replan_keeps_current_topology_in_effective_candidates(self):
         strategy = _strategy(
             planning_signal="hybrid",
@@ -341,16 +368,16 @@ class RoSEQ1SPlanningTests(unittest.TestCase):
             }
 
         with patch(
-            "shapefl.strategy.compute_hybrid_phi",
+            "rosehfl.strategy.compute_hybrid_phi",
             return_value=(
                 {node_id: 1.0 for node_id in range(6)},
                 {"lambda_dynamic": 0.5},
             ),
         ), patch(
-            "shapefl.strategy.run_los_rose_candidates",
+            "rosehfl.strategy.run_los_rose_candidates",
             return_value=(planner_result, []),
         ), patch(
-            "shapefl.strategy.evaluate_on_probe",
+            "rosehfl.strategy.evaluate_on_probe",
             return_value=0.80,
         ), patch.object(
             strategy,

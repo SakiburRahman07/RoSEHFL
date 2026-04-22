@@ -1,6 +1,6 @@
 import unittest
 
-from shapefl.utils.drift import PageHinkleyBank
+from rosehfl.utils.drift import PageHinkleyBank
 
 
 class DriftTests(unittest.TestCase):

@@ -9,7 +9,7 @@ import argparse
 import math
 import os
 
-from shapefl.utils.seed import set_seed
+from rosehfl.utils.seed import set_seed
 
 from ._rose_common import (
     prepare_shared_context,
@@ -17,7 +17,8 @@ from ._rose_common import (
     timestamped_dir,
     write_summary_json,
 )
-from .run_rose_comparison import build_strategy, build_summary
+from ._strategy_factory import build_strategy, default_target_accuracy
+from .run_rose_comparison import build_summary
 
 
 DEFAULT_STRATEGIES = [
@@ -147,7 +148,7 @@ def main() -> None:
     if args.no_augment:
         args.augment = False
 
-    from shapefl.data.data_loader import DATASET_INFO
+    from rosehfl.data.data_loader import DATASET_INFO
 
     ds_info = DATASET_INFO[args.dataset]
     if args.shards_per_node is None:
@@ -157,11 +158,7 @@ def main() -> None:
     if args.B_e is None:
         args.B_e = max(3, math.ceil(args.num_nodes / 3))
     if args.target_accuracy is None:
-        args.target_accuracy = {
-            "fmnist": 0.70,
-            "cifar10": 0.40,
-            "cifar100": 0.20,
-        }[args.dataset]
+        args.target_accuracy = default_target_accuracy(args.dataset)
     if args.output_dir is None:
         args.output_dir = os.path.join(
             "results",
