@@ -29,5 +29,7 @@ class QFedAvgFlatStrategy(FedAvgFlatStrategy):
         self.global_parameters = ndarrays_to_parameters(aggregate)
         self.cumulative_cost_gb += self.per_round_cost_gb
         self.completed_local_epochs += self._current_round_local_epochs
+        self.completed_flower_rounds += 1
+        self._persist_artifacts(completed=self._is_complete())
         return self.global_parameters, {"round": server_round, "q": self.q}
 

@@ -1,3 +1,0 @@
-strategy,display_name,final_accuracy,best_accuracy,best_round,accuracy_at_common_budget,final_loss,final_paper_cost_gb,final_effective_cost_gb,cost_savings_gb,cost_savings_pct,effective_per_round_cost_gb,effective_cost_to_target_gb,rounds_to_target,cost_to_shapefl_final_accuracy_gb,total_model_payload_bytes,total_probe_payload_bytes,elapsed_seconds
-shapefl,ShapeFL,0.7382,0.7437,45,0.7141,0.7036741145133972,15.210727745182949,15.210727745182952,0.0,0.0,0.30421455490365906,6.38850565297684,21,13.689654970664657,3739383600,0,3096.6915171146393
-rose_q1s,RoSE-Q1S,0.7354,0.773,46,0.7354,0.8349324870109558,19.66533844790567,8.256213428082019,11.40912501982365,58.01641832937132,0.15082184721635164,5.085526723215909,29,5.23660321661122,1115638488,14191706,4095.29563832283

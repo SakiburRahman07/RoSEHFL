@@ -167,8 +167,10 @@ class ShapeFlStrategy(fl.server.strategy.Strategy):
         self.phase = "pretrain"
         self.cloud_round = 0
         self.edge_epoch = 0
+        self.completed_flower_rounds = 0
         self.completed_local_epochs = 0
         self._current_round_local_epochs = self.kappa_e
+        self.output_dir: Optional[str] = None
 
         # CID mapping: Flower simulation uses large arbitrary CIDs,
         # not 0..N-1.  Built on first configure_fit call.
@@ -210,6 +212,124 @@ class ShapeFlStrategy(fl.server.strategy.Strategy):
         if self.total_local_epochs is not None:
             return 1 + math.ceil(self.total_local_epochs / self.kappa_e)
         return 1 + self.kappa * self.kappa_c
+
+    @property
+    def remaining_flower_rounds(self) -> int:
+        return max(0, self.total_flower_rounds - self.completed_flower_rounds)
+
+    def _is_complete(self) -> bool:
+        if self.total_local_epochs is not None and self.completed_local_epochs < self.total_local_epochs:
+            return False
+        return self.completed_flower_rounds >= self.total_flower_rounds
+
+    def _status_payload(self, completed: bool) -> Dict[str, object]:
+        return {
+            "completed": bool(completed),
+            "phase": self.phase,
+            "cloud_round": int(self.cloud_round),
+            "edge_epoch": int(self.edge_epoch),
+            "completed_flower_rounds": int(self.completed_flower_rounds),
+            "completed_local_epochs": int(self.completed_local_epochs),
+            "remaining_flower_rounds": int(self.remaining_flower_rounds),
+        }
+
+    def _serialise_metrics(self) -> Dict[str, object]:
+        return {key: list(values) for key, values in self.metrics_history.items()}
+
+    def get_checkpoint_state(self) -> Dict[str, object]:
+        return {
+            "phase": self.phase,
+            "cloud_round": int(self.cloud_round),
+            "edge_epoch": int(self.edge_epoch),
+            "completed_flower_rounds": int(self.completed_flower_rounds),
+            "completed_local_epochs": int(self.completed_local_epochs),
+            "current_round_local_epochs": int(self._current_round_local_epochs),
+            "global_parameters": parameters_to_ndarrays(self.global_parameters),
+            "edge_parameters": {
+                int(edge_id): parameters_to_ndarrays(parameters)
+                for edge_id, parameters in self.edge_parameters.items()
+            },
+            "selected_edges": sorted(self.selected_edges),
+            "edge_nodes": {int(edge_id): sorted(nodes) for edge_id, nodes in self.edge_nodes.items()},
+            "node_edge": {int(node_id): int(edge_id) for node_id, edge_id in self.node_edge.items()},
+            "edge_data_sizes": {int(edge_id): int(size) for edge_id, size in self.edge_data_sizes.items()},
+            "c_ne": self.c_ne,
+            "c_ec": self.c_ec,
+            "per_round_cost_gb": float(self.per_round_cost_gb),
+            "cumulative_cost_gb": float(self.cumulative_cost_gb),
+            "effective_cumulative_cost_gb": float(self.effective_cumulative_cost_gb),
+            "metrics_history": self.metrics_history,
+            "cid_to_partition": {int(cid): int(node_id) for cid, node_id in self._cid_to_partition.items()},
+            "model_size_bytes": int(self.model_size_bytes),
+            "reported_paper_per_round_cost_gb": float(self._reported_paper_per_round_cost_gb),
+            "reported_effective_per_round_cost_gb": float(self._reported_effective_per_round_cost_gb),
+            "reported_model_payload_bytes": int(self._reported_model_payload_bytes),
+            "reported_probe_payload_bytes": int(self._reported_probe_payload_bytes),
+            "current_cycle_model_payload_bytes": int(self.current_cycle_model_payload_bytes),
+            "current_cycle_probe_payload_bytes": int(self.current_cycle_probe_payload_bytes),
+            "current_cycle_effective_cost_gb": float(self.current_cycle_effective_cost_gb),
+            "numpy_rng_state": np.random.get_state(),
+        }
+
+    def load_checkpoint_state(self, state: Dict[str, object]) -> None:
+        self.phase = str(state["phase"])
+        self.cloud_round = int(state["cloud_round"])
+        self.edge_epoch = int(state["edge_epoch"])
+        self.completed_flower_rounds = int(state["completed_flower_rounds"])
+        self.completed_local_epochs = int(state["completed_local_epochs"])
+        self._current_round_local_epochs = int(state.get("current_round_local_epochs", self.kappa_e))
+        self.global_parameters = ndarrays_to_parameters(state["global_parameters"])
+        self.edge_parameters = {
+            int(edge_id): ndarrays_to_parameters(weights)
+            for edge_id, weights in state["edge_parameters"].items()
+        }
+        self.selected_edges = {int(edge_id) for edge_id in state["selected_edges"]}
+        self.edge_nodes = {
+            int(edge_id): [int(node_id) for node_id in nodes]
+            for edge_id, nodes in state["edge_nodes"].items()
+        }
+        self.node_edge = {
+            int(node_id): int(edge_id)
+            for node_id, edge_id in state["node_edge"].items()
+        }
+        self.edge_data_sizes = {
+            int(edge_id): int(size)
+            for edge_id, size in state["edge_data_sizes"].items()
+        }
+        self.c_ne = state["c_ne"]
+        self.c_ec = state["c_ec"]
+        self.per_round_cost_gb = float(state["per_round_cost_gb"])
+        self.cumulative_cost_gb = float(state["cumulative_cost_gb"])
+        self.effective_cumulative_cost_gb = float(state.get("effective_cumulative_cost_gb", self.cumulative_cost_gb))
+        self.metrics_history = state["metrics_history"]
+        self.metrics_history.setdefault("paper_per_round_cost_gb", list(self.metrics_history["per_round_cost_gb"]))
+        self.metrics_history.setdefault("paper_cumulative_cost_gb", list(self.metrics_history["cumulative_cost_gb"]))
+        self.metrics_history.setdefault("effective_per_round_cost_gb", list(self.metrics_history["per_round_cost_gb"]))
+        self.metrics_history.setdefault("effective_cumulative_cost_gb", list(self.metrics_history["cumulative_cost_gb"]))
+        self.metrics_history.setdefault("model_payload_bytes", [])
+        self.metrics_history.setdefault("probe_payload_bytes", [])
+        self._cid_to_partition = {
+            int(cid): int(node_id)
+            for cid, node_id in state.get("cid_to_partition", {}).items()
+        }
+        self.model_size_bytes = int(state.get("model_size_bytes", self.model_size_bytes))
+        self._reported_paper_per_round_cost_gb = float(state.get("reported_paper_per_round_cost_gb", self.per_round_cost_gb))
+        self._reported_effective_per_round_cost_gb = float(state.get("reported_effective_per_round_cost_gb", self.per_round_cost_gb))
+        self._reported_model_payload_bytes = int(state.get("reported_model_payload_bytes", 0))
+        self._reported_probe_payload_bytes = int(state.get("reported_probe_payload_bytes", 0))
+        self.current_cycle_model_payload_bytes = int(state.get("current_cycle_model_payload_bytes", 0))
+        self.current_cycle_probe_payload_bytes = int(state.get("current_cycle_probe_payload_bytes", 0))
+        self.current_cycle_effective_cost_gb = float(state.get("current_cycle_effective_cost_gb", 0.0))
+        if "numpy_rng_state" in state:
+            np.random.set_state(state["numpy_rng_state"])
+
+    def _persist_artifacts(self, completed: bool = False) -> None:
+        if not self.output_dir:
+            return
+        save_json(self._serialise_metrics(), os.path.join(self.output_dir, "metrics.json"))
+        save_json(self._status_payload(completed), os.path.join(self.output_dir, "status.json"))
+        with open(os.path.join(self.output_dir, "checkpoint.pkl"), "wb") as handle:
+            pickle.dump(self.get_checkpoint_state(), handle)
 
     # ════════════════════════════════════════════════════════════════════
     #  Strategy interface
@@ -267,8 +387,13 @@ class ShapeFlStrategy(fl.server.strategy.Strategy):
         failures: List[Union[Tuple[ClientProxy, FitRes], BaseException]],
     ) -> Tuple[Optional[Parameters], Dict[str, Scalar]]:
         if self.phase == "pretrain":
-            return self._aggregate_pretrain(results)
-        return self._aggregate_train(results)
+            aggregated = self._aggregate_pretrain(results)
+        else:
+            aggregated = self._aggregate_train(results)
+        self.completed_flower_rounds += 1
+        if hasattr(self, "_persist_artifacts"):
+            self._persist_artifacts(completed=self._is_complete())
+        return aggregated
 
     def configure_evaluate(
         self, server_round: int, parameters: Parameters, client_manager: ClientManager,
@@ -303,6 +428,8 @@ class ShapeFlStrategy(fl.server.strategy.Strategy):
             accuracy=weighted_acc,
             loss=weighted_loss,
         )
+        if hasattr(self, "_persist_artifacts"):
+            self._persist_artifacts(completed=self._is_complete())
         print(
             f"  Cloud Round {self.cloud_round}/{self.kappa} | "
             f"Acc: {weighted_acc:.4f} | Loss: {weighted_loss:.4f} | "
@@ -337,6 +464,8 @@ class ShapeFlStrategy(fl.server.strategy.Strategy):
             accuracy=accuracy,
             loss=loss,
         )
+        if hasattr(self, "_persist_artifacts"):
+            self._persist_artifacts(completed=self._is_complete())
         print(
             f"  Cloud Round {self.cloud_round}/{self.kappa} | "
             f"Acc: {accuracy:.4f} | Loss: {loss:.4f} | "
@@ -771,7 +900,10 @@ class FedAvgFlatStrategy(fl.server.strategy.Strategy):
         self.global_parameters = initial_parameters
         self.evaluate_fn = evaluate_fn
         self.completed_local_epochs = 0
+        self.completed_flower_rounds = 0
         self._current_round_local_epochs = local_epochs
+        self.output_dir: Optional[str] = None
+        self.model_payload_bytes_per_round = 0
 
         self.per_round_cost_gb = 0.0
         self.cumulative_cost_gb = 0.0
@@ -781,6 +913,12 @@ class FedAvgFlatStrategy(fl.server.strategy.Strategy):
             "loss": [],
             "per_round_cost_gb": [],
             "cumulative_cost_gb": [],
+            "paper_per_round_cost_gb": [],
+            "paper_cumulative_cost_gb": [],
+            "effective_per_round_cost_gb": [],
+            "effective_cumulative_cost_gb": [],
+            "model_payload_bytes": [],
+            "probe_payload_bytes": [],
         }
 
     @property
@@ -789,9 +927,95 @@ class FedAvgFlatStrategy(fl.server.strategy.Strategy):
             return math.ceil(self.total_local_epochs / self.local_epochs)
         return self.kappa
 
-    def set_comm_costs(self, c_ec: Dict[int, float]):
+    @property
+    def remaining_flower_rounds(self) -> int:
+        return max(0, self.total_flower_rounds - self.completed_flower_rounds)
+
+    def set_comm_costs(self, c_ec: Dict[int, float], model_size_bytes: Optional[int] = None):
         """Per-round cost for flat FedAvg (one-direction to match paper)."""
         self.per_round_cost_gb = sum(c_ec[n] for n in range(self.num_nodes))
+        if model_size_bytes is not None:
+            self.model_payload_bytes_per_round = int(model_size_bytes) * int(self.num_nodes)
+
+    def _is_complete(self) -> bool:
+        if self.total_local_epochs is not None and self.completed_local_epochs < self.total_local_epochs:
+            return False
+        return self.completed_flower_rounds >= self.total_flower_rounds
+
+    def _record_metrics(self, server_round: int, accuracy: float, loss: float) -> None:
+        self.metrics_history["cloud_round"].append(int(server_round))
+        self.metrics_history["accuracy"].append(float(accuracy))
+        self.metrics_history["loss"].append(float(loss))
+        self.metrics_history["per_round_cost_gb"].append(float(self.per_round_cost_gb))
+        self.metrics_history["cumulative_cost_gb"].append(float(self.cumulative_cost_gb))
+        self.metrics_history["paper_per_round_cost_gb"].append(float(self.per_round_cost_gb))
+        self.metrics_history["paper_cumulative_cost_gb"].append(float(self.cumulative_cost_gb))
+        self.metrics_history["effective_per_round_cost_gb"].append(float(self.per_round_cost_gb))
+        self.metrics_history["effective_cumulative_cost_gb"].append(float(self.cumulative_cost_gb))
+        self.metrics_history["model_payload_bytes"].append(int(self.model_payload_bytes_per_round))
+        self.metrics_history["probe_payload_bytes"].append(0)
+
+    def _status_payload(self, completed: bool) -> Dict[str, object]:
+        return {
+            "completed": bool(completed),
+            "completed_flower_rounds": int(self.completed_flower_rounds),
+            "completed_local_epochs": int(self.completed_local_epochs),
+            "remaining_flower_rounds": int(self.remaining_flower_rounds),
+        }
+
+    def _serialise_metrics(self) -> Dict[str, object]:
+        return {
+            key: list(values)
+            for key, values in self.metrics_history.items()
+        }
+
+    def _extra_checkpoint_state(self) -> Dict[str, object]:
+        return {}
+
+    def _load_extra_checkpoint_state(self, state: Dict[str, object]) -> None:
+        return None
+
+    def get_checkpoint_state(self) -> Dict[str, object]:
+        state = {
+            "completed_flower_rounds": int(self.completed_flower_rounds),
+            "completed_local_epochs": int(self.completed_local_epochs),
+            "current_round_local_epochs": int(self._current_round_local_epochs),
+            "global_parameters": parameters_to_ndarrays(self.global_parameters),
+            "per_round_cost_gb": float(self.per_round_cost_gb),
+            "cumulative_cost_gb": float(self.cumulative_cost_gb),
+            "metrics_history": self.metrics_history,
+            "model_payload_bytes_per_round": int(self.model_payload_bytes_per_round),
+            "numpy_rng_state": np.random.get_state(),
+        }
+        state.update(self._extra_checkpoint_state())
+        return state
+
+    def load_checkpoint_state(self, state: Dict[str, object]) -> None:
+        self.completed_flower_rounds = int(state["completed_flower_rounds"])
+        self.completed_local_epochs = int(state["completed_local_epochs"])
+        self._current_round_local_epochs = int(state.get("current_round_local_epochs", self.local_epochs))
+        self.global_parameters = ndarrays_to_parameters(state["global_parameters"])
+        self.per_round_cost_gb = float(state["per_round_cost_gb"])
+        self.cumulative_cost_gb = float(state["cumulative_cost_gb"])
+        self.metrics_history = state["metrics_history"]
+        self.metrics_history.setdefault("paper_per_round_cost_gb", list(self.metrics_history["per_round_cost_gb"]))
+        self.metrics_history.setdefault("paper_cumulative_cost_gb", list(self.metrics_history["cumulative_cost_gb"]))
+        self.metrics_history.setdefault("effective_per_round_cost_gb", list(self.metrics_history["per_round_cost_gb"]))
+        self.metrics_history.setdefault("effective_cumulative_cost_gb", list(self.metrics_history["cumulative_cost_gb"]))
+        self.metrics_history.setdefault("model_payload_bytes", [])
+        self.metrics_history.setdefault("probe_payload_bytes", [])
+        self.model_payload_bytes_per_round = int(state.get("model_payload_bytes_per_round", 0))
+        if "numpy_rng_state" in state:
+            np.random.set_state(state["numpy_rng_state"])
+        self._load_extra_checkpoint_state(state)
+
+    def _persist_artifacts(self, completed: bool = False) -> None:
+        if not self.output_dir:
+            return
+        save_json(self._serialise_metrics(), os.path.join(self.output_dir, "metrics.json"))
+        save_json(self._status_payload(completed), os.path.join(self.output_dir, "status.json"))
+        with open(os.path.join(self.output_dir, "checkpoint.pkl"), "wb") as handle:
+            pickle.dump(self.get_checkpoint_state(), handle)
 
     def initialize_parameters(self, client_manager):
         return self.initial_parameters
@@ -824,6 +1048,8 @@ class FedAvgFlatStrategy(fl.server.strategy.Strategy):
         self.global_parameters = ndarrays_to_parameters(avg)
         self.cumulative_cost_gb += self.per_round_cost_gb
         self.completed_local_epochs += self._current_round_local_epochs
+        self.completed_flower_rounds += 1
+        self._persist_artifacts(completed=self._is_complete())
         return self.global_parameters, {"round": server_round}
 
     def evaluate(
@@ -835,11 +1061,8 @@ class FedAvgFlatStrategy(fl.server.strategy.Strategy):
         params = parameters_to_ndarrays(parameters)
         loss, metrics = self.evaluate_fn(server_round, params, {})
         accuracy = metrics.get("accuracy", 0.0)
-        self.metrics_history["cloud_round"].append(server_round)
-        self.metrics_history["accuracy"].append(accuracy)
-        self.metrics_history["loss"].append(loss)
-        self.metrics_history["per_round_cost_gb"].append(self.per_round_cost_gb)
-        self.metrics_history["cumulative_cost_gb"].append(self.cumulative_cost_gb)
+        self._record_metrics(server_round, accuracy, loss)
+        self._persist_artifacts(completed=self._is_complete())
         print(
             f"  Round {server_round}/{self.kappa} | "
             f"Acc: {accuracy:.4f} | Loss: {loss:.4f} | "
@@ -864,11 +1087,8 @@ class FedAvgFlatStrategy(fl.server.strategy.Strategy):
             sum(r.metrics.get("accuracy", 0.0) * r.num_examples for _, r in results)
             / total_examples
         )
-        self.metrics_history["cloud_round"].append(server_round)
-        self.metrics_history["accuracy"].append(weighted_acc)
-        self.metrics_history["loss"].append(weighted_loss)
-        self.metrics_history["per_round_cost_gb"].append(self.per_round_cost_gb)
-        self.metrics_history["cumulative_cost_gb"].append(self.cumulative_cost_gb)
+        self._record_metrics(server_round, weighted_acc, weighted_loss)
+        self._persist_artifacts(completed=self._is_complete())
         print(
             f"  Round {server_round}/{self.kappa} | "
             f"Acc: {weighted_acc:.4f} | Loss: {weighted_loss:.4f} | "

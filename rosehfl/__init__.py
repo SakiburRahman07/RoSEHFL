@@ -13,7 +13,7 @@ Symbol names keep historical ShapeFL-compatible naming where useful for
 experiment scripts and tests.
 
 Typical simulation entrypoint:
-    python -m scripts.run_rose_simulation
+    python -m scripts.run_simulation
 """
 
 from .client import FlClient, client_fn_factory

@@ -16,10 +16,12 @@ import json
 import os
 import sys
 
-from rosehfl.utils.visualization import (
-    visualize_simulation,
-    visualize_comparison,
-)
+from rosehfl.utils.visualization import visualize_simulation
+
+try:
+    from ._comparison_plots import generate_comparison_package
+except ImportError:
+    from scripts._comparison_plots import generate_comparison_package
 
 
 def find_json(path: str) -> str:
@@ -27,8 +29,7 @@ def find_json(path: str) -> str:
     if os.path.isfile(path):
         return path
     if os.path.isdir(path):
-        for name in ["flower_comparison_results.json", "flower_simulation_results.json",
-                      "comparison_results.json", "simulation_results.json", "metrics.json"]:
+        for name in ["comparison_results.json", "simulation_results.json", "metrics.json", "flower_comparison_results.json", "flower_simulation_results.json"]:
             candidate = os.path.join(path, name)
             if os.path.isfile(candidate):
                 return candidate
@@ -46,6 +47,10 @@ def main():
     parser.add_argument("path", type=str, help="Path to results JSON file or directory")
     parser.add_argument("--output-dir", type=str, default=None,
                         help="Override output directory for plots (default: same as JSON)")
+    parser.add_argument("--title", type=str, default=None,
+                        help="Optional title override for comparison overview plots")
+    parser.add_argument("--dpi", type=int, default=180,
+                        help="Output DPI for comparison figures")
     args = parser.parse_args()
 
     json_path = find_json(args.path)
@@ -55,24 +60,19 @@ def main():
     with open(json_path) as f:
         data = json.load(f)
 
-    # Detect if it's a comparison, legacy single simulation, or RoSE metrics directory
-    if "per_round_metrics" in data and "summary" in data:
-        # Comparison results
-        config = data.get("config", {})
-        summary = data["summary"]
-        all_metrics = data["per_round_metrics"]
-        target = config.get("target_accuracy", 0.70)
-
-        print(f"Detected: COMPARISON run ({len(summary)} strategies)")
-        visualize_comparison(all_metrics, summary, config, target, output_dir)
+    if "per_round_metrics" in data:
+        print(f"Detected: COMPARISON run ({len(data['per_round_metrics'])} strategies)")
+        generate_comparison_package(
+            json_path,
+            output_dir=output_dir,
+            title=args.title,
+            dpi=args.dpi,
+        )
 
     elif "metrics" in data:
-        # Single simulation results
         config = data.get("config", {})
         metrics = data["metrics"]
-
         edge_nodes = data.get("edge_nodes", {})
-
         print("Detected: SINGLE SIMULATION")
         visualize_simulation(metrics, config, edge_nodes, output_dir)
 

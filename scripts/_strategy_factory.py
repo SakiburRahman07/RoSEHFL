@@ -16,6 +16,55 @@ from .baselines.gtg_shapley import GTGShapleyFlatStrategy
 from .baselines.q_fedavg import QFedAvgFlatStrategy
 
 
+SUPPORTED_STRATEGIES = [
+    "shapefl",
+    "share",
+    "cost_first",
+    "data_first",
+    "random",
+    "rose",
+    "roseplusplus",
+    "rose_q1",
+    "rose_q1s",
+    "rose_effective",
+    "rose_median",
+    "rose_trimmed_mean",
+    "rose_krum",
+    "fedavg",
+    "fedprox",
+    "gtg_shapley",
+    "q_fedavg",
+]
+
+HIERARCHICAL_SHAPEFL_MODES = {
+    "shapefl": "shapefl",
+    "share": "share",
+    "cost_first": "cost_first",
+    "data_first": "data_first",
+    "random": "random",
+}
+
+DISPLAY_NAMES = {
+    "shapefl": "ShapeFL",
+    "share": "SHARE",
+    "cost_first": "Cost First",
+    "data_first": "Data First",
+    "random": "Random",
+    "rose": "RoSE",
+    "roseplusplus": "RoSE++",
+    "rose_q1": "RoSE-Q1",
+    "rose_q1s": "RoSE-Q1S",
+    "rose_effective": "RoSE-Effective",
+    "rose_median": "RoSE-Median",
+    "rose_trimmed_mean": "RoSE-TrimmedMean",
+    "rose_krum": "RoSE-Krum",
+    "fedavg": "FedAvg",
+    "fedprox": "FedProx",
+    "gtg_shapley": "GTG-Shapley",
+    "q_fedavg": "q-FedAvg",
+}
+
+
 DEFAULT_TARGET_ACCURACY = {
     "fmnist": 0.70,
     "cifar10": 0.40,
@@ -25,6 +74,10 @@ DEFAULT_TARGET_ACCURACY = {
 
 def default_target_accuracy(dataset_name: str) -> float:
     return float(DEFAULT_TARGET_ACCURACY[dataset_name])
+
+
+def display_name(strategy_name: str) -> str:
+    return DISPLAY_NAMES.get(strategy_name, strategy_name.replace("_", " ").title())
 
 
 def _arg(args, name: str, default):
@@ -43,7 +96,7 @@ def _flat_strategy_comm_costs(args, shared):
         model_size_bytes,
         topology=args.topology,
     )
-    return c_ec
+    return c_ec, model_size_bytes
 
 
 def build_strategy(name: str, args, shared, output_dir: str):
@@ -312,7 +365,7 @@ def build_strategy(name: str, args, shared, output_dir: str):
         strategy = build_strategy("rose", args, shared, output_dir)
         strategy.agg_rule = "krum"
         return strategy
-    if name == "shapefl":
+    if name in HIERARCHICAL_SHAPEFL_MODES:
         return ShapeFlStrategy(
             model_name=args.model,
             dataset_name=args.dataset,
@@ -327,7 +380,7 @@ def build_strategy(name: str, args, shared, output_dir: str):
             lr=args.lr,
             momentum=args.momentum,
             initial_parameters=shared["initial_parameters"],
-            planning_mode="shapefl",
+            planning_mode=HIERARCHICAL_SHAPEFL_MODES[name],
             topology=args.topology,
             evaluate_fn=shared["evaluate_fn"],
             node_label_counts=shared["node_label_counts"],
@@ -344,7 +397,8 @@ def build_strategy(name: str, args, shared, output_dir: str):
             initial_parameters=shared["initial_parameters"],
             evaluate_fn=shared["evaluate_fn"],
         )
-        strategy.set_comm_costs(_flat_strategy_comm_costs(args, shared))
+        c_ec, model_size_bytes = _flat_strategy_comm_costs(args, shared)
+        strategy.set_comm_costs(c_ec, model_size_bytes=model_size_bytes)
         return strategy
     if name == "fedprox":
         strategy = FedProxFlatStrategy(
@@ -358,7 +412,8 @@ def build_strategy(name: str, args, shared, output_dir: str):
             initial_parameters=shared["initial_parameters"],
             evaluate_fn=shared["evaluate_fn"],
         )
-        strategy.set_comm_costs(_flat_strategy_comm_costs(args, shared))
+        c_ec, model_size_bytes = _flat_strategy_comm_costs(args, shared)
+        strategy.set_comm_costs(c_ec, model_size_bytes=model_size_bytes)
         return strategy
     if name == "gtg_shapley":
         strategy = GTGShapleyFlatStrategy(
@@ -377,7 +432,8 @@ def build_strategy(name: str, args, shared, output_dir: str):
             shapley_K=_arg(args, "shapley_K", 6),
             seed=args.seed,
         )
-        strategy.set_comm_costs(_flat_strategy_comm_costs(args, shared))
+        c_ec, model_size_bytes = _flat_strategy_comm_costs(args, shared)
+        strategy.set_comm_costs(c_ec, model_size_bytes=model_size_bytes)
         return strategy
     if name == "q_fedavg":
         strategy = QFedAvgFlatStrategy(
@@ -391,6 +447,7 @@ def build_strategy(name: str, args, shared, output_dir: str):
             evaluate_fn=shared["evaluate_fn"],
             q=_arg(args, "q_fedavg_q", 2.0),
         )
-        strategy.set_comm_costs(_flat_strategy_comm_costs(args, shared))
+        c_ec, model_size_bytes = _flat_strategy_comm_costs(args, shared)
+        strategy.set_comm_costs(c_ec, model_size_bytes=model_size_bytes)
         return strategy
     raise ValueError(f"Unknown strategy: {name}")
