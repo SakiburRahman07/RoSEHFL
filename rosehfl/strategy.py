@@ -103,13 +103,21 @@ def generate_communication_costs(
 def _weighted_average(
     weights_list: List[List[np.ndarray]], sizes: List[int],
 ) -> List[np.ndarray]:
-    """Weighted FedAvg across a list of model weight arrays."""
+    """Weighted FedAvg across a list of model weight arrays.
+
+    Accumulates in float64 and casts each result back to the original
+    layer dtype so that integer state buffers (e.g. BatchNorm
+    ``num_batches_tracked``) do not trigger a ufunc casting error.
+    """
     total = sum(sizes)
     num_layers = len(weights_list[0])
-    avg = [np.zeros_like(weights_list[0][i]) for i in range(num_layers)]
-    for w, s in zip(weights_list, sizes):
-        for i in range(num_layers):
-            avg[i] += w[i] * (s / total)
+    avg: List[np.ndarray] = []
+    for i in range(num_layers):
+        ref = weights_list[0][i]
+        acc = np.zeros(np.shape(ref), dtype=np.float64)
+        for w, s in zip(weights_list, sizes):
+            acc += np.asarray(w[i], dtype=np.float64) * (s / total)
+        avg.append(acc.astype(ref.dtype, copy=False))
     return avg
 
 
@@ -171,6 +179,7 @@ class ShapeFlStrategy(fl.server.strategy.Strategy):
         self.completed_local_epochs = 0
         self._current_round_local_epochs = self.kappa_e
         self.output_dir: Optional[str] = None
+        self._checkpoint_loaded = False
 
         # CID mapping: Flower simulation uses large arbitrary CIDs,
         # not 0..N-1.  Built on first configure_fit call.
@@ -322,6 +331,7 @@ class ShapeFlStrategy(fl.server.strategy.Strategy):
         self.current_cycle_effective_cost_gb = float(state.get("current_cycle_effective_cost_gb", 0.0))
         if "numpy_rng_state" in state:
             np.random.set_state(state["numpy_rng_state"])
+        self._checkpoint_loaded = True
 
     def _persist_artifacts(self, completed: bool = False) -> None:
         if not self.output_dir:
@@ -336,7 +346,39 @@ class ShapeFlStrategy(fl.server.strategy.Strategy):
     # ════════════════════════════════════════════════════════════════════
 
     def initialize_parameters(self, client_manager: ClientManager) -> Optional[Parameters]:
-        return self.initial_parameters
+        if self._checkpoint_loaded:
+            self._fill_resume_gap()
+        return self.global_parameters
+
+    def _fill_resume_gap(self) -> None:
+        """Fill a missing metrics entry when resuming after a crash during evaluate.
+
+        A gap exists if the last recorded cloud_round is behind the current
+        cloud_round (hierarchical strategies record one metric per completed
+        cloud cycle, at the edge_epoch == 0 boundary).  Only fills when a
+        centralized evaluate_fn is available.
+        """
+        if self.evaluate_fn is None:
+            return
+        if self.edge_epoch != 0:
+            return
+        if self.cloud_round == 0:
+            return
+        recorded = self.metrics_history.get("cloud_round", [])
+        if recorded and int(recorded[-1]) >= int(self.cloud_round):
+            return
+        params = parameters_to_ndarrays(self.global_parameters)
+        loss, metrics = self.evaluate_fn(0, params, {})
+        accuracy = metrics.get("accuracy", 0.0)
+        self._record_completed_cloud_metrics(accuracy=accuracy, loss=loss)
+        if hasattr(self, "_persist_artifacts"):
+            self._persist_artifacts(completed=self._is_complete())
+        print(
+            f"  [resume] Cloud Round {self.cloud_round}/{self.kappa} | "
+            f"Acc: {accuracy:.4f} | Loss: {loss:.4f} | "
+            f"PaperCost: {self.cumulative_cost_gb:.4f} GB | "
+            f"EffectiveCost: {self.effective_cumulative_cost_gb:.4f} GB"
+        )
 
     def _resolve_node_id(self, cid: str) -> int:
         """Map Flower's arbitrary CID to partition index 0..N-1."""
@@ -398,6 +440,8 @@ class ShapeFlStrategy(fl.server.strategy.Strategy):
     def configure_evaluate(
         self, server_round: int, parameters: Parameters, client_manager: ClientManager,
     ) -> List[Tuple[ClientProxy, EvaluateIns]]:
+        if server_round == 0 and self._checkpoint_loaded:
+            return []
         # Skip distributed eval when using centralized evaluate_fn
         if self.evaluate_fn is not None:
             return []
@@ -454,6 +498,8 @@ class ShapeFlStrategy(fl.server.strategy.Strategy):
         Flower uses distributed evaluation via configure_evaluate / aggregate_evaluate.
         """
         if self.evaluate_fn is None:
+            return None
+        if server_round == 0 and self._checkpoint_loaded:
             return None
         if self.phase == "pretrain" or self.edge_epoch != 0 or self.cloud_round == 0:
             return None
@@ -903,6 +949,7 @@ class FedAvgFlatStrategy(fl.server.strategy.Strategy):
         self.completed_flower_rounds = 0
         self._current_round_local_epochs = local_epochs
         self.output_dir: Optional[str] = None
+        self._checkpoint_loaded = False
         self.model_payload_bytes_per_round = 0
 
         self.per_round_cost_gb = 0.0
@@ -943,7 +990,8 @@ class FedAvgFlatStrategy(fl.server.strategy.Strategy):
         return self.completed_flower_rounds >= self.total_flower_rounds
 
     def _record_metrics(self, server_round: int, accuracy: float, loss: float) -> None:
-        self.metrics_history["cloud_round"].append(int(server_round))
+        round_id = int(self.completed_flower_rounds) if self._checkpoint_loaded else int(server_round)
+        self.metrics_history["cloud_round"].append(round_id)
         self.metrics_history["accuracy"].append(float(accuracy))
         self.metrics_history["loss"].append(float(loss))
         self.metrics_history["per_round_cost_gb"].append(float(self.per_round_cost_gb))
@@ -1008,6 +1056,7 @@ class FedAvgFlatStrategy(fl.server.strategy.Strategy):
         if "numpy_rng_state" in state:
             np.random.set_state(state["numpy_rng_state"])
         self._load_extra_checkpoint_state(state)
+        self._checkpoint_loaded = True
 
     def _persist_artifacts(self, completed: bool = False) -> None:
         if not self.output_dir:
@@ -1018,7 +1067,32 @@ class FedAvgFlatStrategy(fl.server.strategy.Strategy):
             pickle.dump(self.get_checkpoint_state(), handle)
 
     def initialize_parameters(self, client_manager):
-        return self.initial_parameters
+        if self._checkpoint_loaded:
+            self._fill_resume_gap()
+        return self.global_parameters
+
+    def _fill_resume_gap(self) -> None:
+        """Fill a missing metrics entry when resuming after a crash during evaluate.
+
+        A gap exists if the last recorded cloud_round is behind the current
+        completed_flower_rounds counter (flat strategies record one metric per
+        Flower round).  Only fills when a centralized evaluate_fn is available.
+        """
+        if self.evaluate_fn is None:
+            return
+        recorded = self.metrics_history.get("cloud_round", [])
+        if recorded and int(recorded[-1]) >= int(self.completed_flower_rounds):
+            return
+        params = parameters_to_ndarrays(self.global_parameters)
+        loss, metrics = self.evaluate_fn(0, params, {})
+        accuracy = metrics.get("accuracy", 0.0)
+        self._record_metrics(0, accuracy, loss)
+        self._persist_artifacts(completed=self._is_complete())
+        print(
+            f"  [resume] Round {self.completed_flower_rounds}/{self.kappa} | "
+            f"Acc: {accuracy:.4f} | Loss: {loss:.4f} | "
+            f"CumCost: {self.cumulative_cost_gb:.4f} GB"
+        )
 
     def configure_fit(self, server_round, parameters, client_manager):
         clients = client_manager.sample(
@@ -1058,19 +1132,24 @@ class FedAvgFlatStrategy(fl.server.strategy.Strategy):
         """Centralized server-side evaluation (preferred when evaluate_fn is set)."""
         if self.evaluate_fn is None:
             return None
+        if server_round == 0 and self._checkpoint_loaded:
+            return None
         params = parameters_to_ndarrays(parameters)
         loss, metrics = self.evaluate_fn(server_round, params, {})
         accuracy = metrics.get("accuracy", 0.0)
         self._record_metrics(server_round, accuracy, loss)
         self._persist_artifacts(completed=self._is_complete())
+        round_id = int(self.completed_flower_rounds) if self._checkpoint_loaded else int(server_round)
         print(
-            f"  Round {server_round}/{self.kappa} | "
+            f"  Round {round_id}/{self.kappa} | "
             f"Acc: {accuracy:.4f} | Loss: {loss:.4f} | "
             f"CumCost: {self.cumulative_cost_gb:.4f} GB"
         )
         return loss, metrics
 
     def configure_evaluate(self, server_round, parameters, client_manager):
+        if server_round == 0 and self._checkpoint_loaded:
+            return []
         if self.evaluate_fn is not None:
             return []
         clients = client_manager.sample(
@@ -1089,8 +1168,9 @@ class FedAvgFlatStrategy(fl.server.strategy.Strategy):
         )
         self._record_metrics(server_round, weighted_acc, weighted_loss)
         self._persist_artifacts(completed=self._is_complete())
+        round_id = int(self.completed_flower_rounds) if self._checkpoint_loaded else int(server_round)
         print(
-            f"  Round {server_round}/{self.kappa} | "
+            f"  Round {round_id}/{self.kappa} | "
             f"Acc: {weighted_acc:.4f} | Loss: {weighted_loss:.4f} | "
             f"CumCost: {self.cumulative_cost_gb:.4f} GB"
         )
@@ -1862,6 +1942,7 @@ class RoSEHFLStrategy(ShapeFlStrategy):
         self.server_optimizer_step = int(state.get("server_optimizer_step", 0))
         if "numpy_rng_state" in state:
             np.random.set_state(state["numpy_rng_state"])
+        self._checkpoint_loaded = True
 
     def _persist_artifacts(self, completed: bool = False) -> None:
         if not self.output_dir:
@@ -3522,6 +3603,8 @@ class RoSEHFLStrategy(ShapeFlStrategy):
         parameters: Parameters,
         client_manager: ClientManager,
     ) -> List[Tuple[ClientProxy, EvaluateIns]]:
+        if server_round == 0 and self._checkpoint_loaded:
+            return []
         if self.evaluate_fn is not None:
             return []
         if self.phase == "warmup" or self.edge_epoch != 0 or self.cloud_round == 0:
@@ -3565,6 +3648,8 @@ class RoSEHFLStrategy(ShapeFlStrategy):
         parameters: Parameters,
     ) -> Optional[Tuple[float, Dict[str, Scalar]]]:
         if self.evaluate_fn is None:
+            return None
+        if server_round == 0 and self._checkpoint_loaded:
             return None
         if self.phase == "warmup" or self.edge_epoch != 0 or self.cloud_round == 0:
             return None

@@ -407,15 +407,17 @@ def run_strategy_bundle(
         if checkpoint is not None:
             strategy.load_checkpoint_state(checkpoint)
 
-    write_json(
-        os.path.join(output_dir, "metadata.json"),
-        {
-            "strategy_name": strategy_name,
-            "display_name": display_name(strategy_name),
-            "config": vars(args),
-            "started_at": utc_timestamp(),
-        },
-    )
+    strategy_metadata_path = os.path.join(output_dir, "metadata.json")
+    if not os.path.isfile(strategy_metadata_path):
+        write_json(
+            strategy_metadata_path,
+            {
+                "strategy_name": strategy_name,
+                "display_name": display_name(strategy_name),
+                "config": vars(args),
+                "started_at": utc_timestamp(),
+            },
+        )
 
     remaining_rounds = getattr(strategy, "remaining_flower_rounds", None)
     if remaining_rounds is None:
