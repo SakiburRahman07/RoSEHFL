@@ -170,16 +170,6 @@ def mean_softmax_distribution(logits: np.ndarray) -> np.ndarray:
     return probs.cpu().numpy().astype(np.float64)
 
 
-def probe_entropy_from_logits(logits: np.ndarray, eps: float = 1e-9) -> float:
-    """Entropy of the mean probe-set softmax distribution."""
-    probs = mean_softmax_distribution(logits)
-    if probs.size == 0:
-        return 0.0
-    probs = np.clip(probs, eps, None)
-    probs = probs / probs.sum()
-    return float(-(probs * np.log(probs)).sum())
-
-
 def accuracy_from_logits(
     logits: np.ndarray,
     targets: np.ndarray,
@@ -203,6 +193,8 @@ def gaussian_noise_sigma(
     """Return the Gaussian-mechanism standard deviation."""
     if epsilon <= 0:
         raise ValueError("gaussian_noise_sigma: epsilon must be positive")
+    if delta <= 0:
+        raise ValueError("gaussian_noise_sigma: delta must be positive")
     return float(sensitivity * np.sqrt(2.0 * np.log(1.25 / delta)) / epsilon)
 
 
@@ -215,22 +207,10 @@ def add_gaussian_noise(
 ) -> np.ndarray:
     """Apply Gaussian-mechanism noise to an ndarray."""
     sigma = gaussian_noise_sigma(epsilon=epsilon, delta=delta, sensitivity=sensitivity)
+    orig_dtype = array.dtype
     rng = np.random.RandomState(seed)
     noisy = array.astype(np.float64) + rng.normal(0.0, sigma, size=array.shape)
-    return noisy.astype(np.float32)
-
-
-def add_gaussian_dp_noise(
-    phi: Dict[int, float],
-    epsilon: float,
-    delta: float = 1e-5,
-    sensitivity: float = 1.0,
-    seed: Optional[int] = None,
-) -> Dict[int, float]:
-    """Apply Gaussian noise to a Shapley-value dictionary."""
-    sigma = gaussian_noise_sigma(epsilon=epsilon, delta=delta, sensitivity=sensitivity)
-    rng = np.random.RandomState(seed)
-    return {node_id: float(value + rng.normal(0.0, sigma)) for node_id, value in phi.items()}
+    return noisy.astype(orig_dtype)
 
 
 def serialize_probe_logits(

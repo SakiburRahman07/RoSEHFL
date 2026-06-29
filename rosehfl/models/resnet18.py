@@ -44,12 +44,12 @@ class ResNet18(nn.Module):
     ShapeFL similarity computation.
     """
 
-    def __init__(self, num_classes: int = 100):
+    def __init__(self, num_classes: int = 100, input_channels: int = 3):
         super().__init__()
         self.linear_layer_name = "linear"
         self.in_planes = 64
 
-        self.conv1 = nn.Conv2d(3, 64, 3, stride=1, padding=1, bias=False)
+        self.conv1 = nn.Conv2d(input_channels, 64, 3, stride=1, padding=1, bias=False)
         self.bn1 = nn.BatchNorm2d(64)
         self.layer1 = self._make_layer(64, 2, stride=1)
         self.layer2 = self._make_layer(128, 2, stride=2)
@@ -88,11 +88,3 @@ class ResNet18(nn.Module):
         out = out.view(out.size(0), -1)
         out = self.linear(out)
         return out
-
-    def get_linear_layer_params(self) -> torch.Tensor:
-        weight = self.linear.weight.data.flatten()
-        bias = self.linear.bias.data.flatten()
-        return torch.cat([weight, bias])
-
-    def get_linear_layer_size(self) -> int:
-        return self.linear.weight.numel() + self.linear.bias.numel()

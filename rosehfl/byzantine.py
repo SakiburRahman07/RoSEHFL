@@ -30,7 +30,7 @@ from typing import List, Optional, Tuple
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import Dataset
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -77,8 +77,11 @@ class GaussianNoiseAttacker(ByzantineAttacker):
     """Additive N(0, σ²) noise on every weight coordinate."""
     sigma: float = 0.5
 
+    def __post_init__(self):
+        self._rng = np.random.RandomState(self.seed)
+
     def apply_to_weights(self, weights: List[np.ndarray]) -> List[np.ndarray]:
-        rng = np.random.RandomState(self.seed)
+        rng = self._rng
         return [
             (w + rng.normal(0.0, self.sigma, size=w.shape)).astype(w.dtype)
             for w in weights

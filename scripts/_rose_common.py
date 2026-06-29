@@ -8,7 +8,7 @@ import json
 import os
 import time
 from datetime import datetime
-from typing import Callable, Dict, Iterable, Optional
+from typing import Callable, Dict, Optional
 
 import flwr as fl
 import numpy as np
@@ -223,6 +223,8 @@ def load_checkpoint_if_available(output_dir: str) -> Optional[Dict[str, object]]
         return None
     import pickle
 
+    # SECURITY: Only load checkpoint files you trust. pickle.load can execute
+    # arbitrary code. Do not load checkpoints from untrusted sources.
     with open(checkpoint_path, "rb") as handle:
         return pickle.load(handle)
 

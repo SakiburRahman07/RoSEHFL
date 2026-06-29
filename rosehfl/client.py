@@ -112,9 +112,9 @@ class FlClient(fl.client.NumPyClient):
         if "class_prior" in config and config["class_prior"] is not None:
             raw_prior = config["class_prior"]
             if isinstance(raw_prior, str):
-                class_prior = np.fromstring(raw_prior, sep=",", dtype=np.float32)
+                class_prior = np.array(raw_prior.split(","), dtype=np.float32)
             elif isinstance(raw_prior, (bytes, bytearray)):
-                class_prior = np.fromstring(raw_prior.decode("utf-8"), sep=",", dtype=np.float32)
+                class_prior = np.array(raw_prior.decode("utf-8").split(","), dtype=np.float32)
             else:
                 class_prior = np.asarray(raw_prior, dtype=np.float32)
             if class_prior.size == 0:

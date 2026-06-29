@@ -6,7 +6,7 @@ Centralised factory for creating models by name, plus serialisation helpers.
 
 import torch
 import torch.nn as nn
-from typing import Dict, Tuple, Optional
+from typing import Tuple, Optional
 
 
 def get_model(
@@ -23,10 +23,10 @@ def get_model(
         model = LeNet5(num_classes=num_classes, input_channels=input_channels)
     elif name == "mobilenetv2":
         from .mobilenetv2 import MobileNetV2
-        model = MobileNetV2(num_classes=num_classes)
+        model = MobileNetV2(num_classes=num_classes, input_channels=input_channels)
     elif name == "resnet18":
         from .resnet18 import ResNet18
-        model = ResNet18(num_classes=num_classes)
+        model = ResNet18(num_classes=num_classes, input_channels=input_channels)
     else:
         raise ValueError(
             f"Unknown model: {model_name}. Choose from: lenet5, mobilenetv2, resnet18"
@@ -45,18 +45,3 @@ def get_model_size(model: nn.Module) -> Tuple[int, float]:
         p.numel() * p.element_size() for p in model.parameters()
     ) / (1024 * 1024)
     return num_params, size_mb
-
-
-def model_to_dict(model: nn.Module) -> Dict[str, list]:
-    """Convert model parameters to a JSON-serialisable dictionary."""
-    return {
-        name: param.cpu().detach().numpy().tolist()
-        for name, param in model.state_dict().items()
-    }
-
-
-def dict_to_model(model: nn.Module, params_dict: Dict[str, list]) -> nn.Module:
-    """Load model parameters from a dictionary."""
-    state_dict = {name: torch.tensor(param) for name, param in params_dict.items()}
-    model.load_state_dict(state_dict)
-    return model

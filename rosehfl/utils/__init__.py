@@ -2,7 +2,6 @@ from .similarity import (
     compute_cosine_similarity,
     compute_data_distribution_diversity,
     compute_similarity_matrix,
-    compute_similarity_from_updates,
 )
 from .shapley import (
     compute_hybrid_phi,

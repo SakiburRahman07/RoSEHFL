@@ -6,7 +6,7 @@ S_ij = 1 - cos(Δw_i^(L), Δw_j^(L))
 
 import torch
 import numpy as np
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
 
 def compute_cosine_similarity(vec1: torch.Tensor, vec2: torch.Tensor) -> float:
@@ -45,21 +45,6 @@ def compute_similarity_matrix(linear_updates: Dict[int, torch.Tensor]) -> np.nda
                 d = compute_data_distribution_diversity(
                     linear_updates[ni], linear_updates[nj]
                 )
-                S[i, j] = d
-                S[j, i] = d
-    return S
-
-
-def compute_similarity_from_updates(
-    updates: List[Tuple[int, torch.Tensor]], num_nodes: int
-) -> np.ndarray:
-    """Build S from a list of ``(node_id, update)`` tuples."""
-    update_dict = {nid: u for nid, u in updates}
-    S = np.zeros((num_nodes, num_nodes))
-    for i in range(num_nodes):
-        for j in range(i + 1, num_nodes):
-            if i in update_dict and j in update_dict:
-                d = compute_data_distribution_diversity(update_dict[i], update_dict[j])
                 S[i, j] = d
                 S[j, i] = d
     return S

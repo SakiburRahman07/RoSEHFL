@@ -15,5 +15,5 @@ metrics/
 !paper*.md
 results/
 *.zip
-
+reports/
 .env

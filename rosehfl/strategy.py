@@ -21,6 +21,7 @@ Round semantics:
 import math
 import os
 import pickle
+import time
 from collections import defaultdict
 import numpy as np
 import torch
@@ -40,6 +41,7 @@ from flwr.common import (
 from flwr.server.client_proxy import ClientProxy
 from flwr.server.client_manager import ClientManager
 
+from ._cid_mapper import CidMapper
 from .models.factory import get_model
 from .data.data_loader import DATASET_INFO
 from .algorithms.los import run_los
@@ -109,6 +111,8 @@ def _weighted_average(
     layer dtype so that integer state buffers (e.g. BatchNorm
     ``num_batches_tracked``) do not trigger a ufunc casting error.
     """
+    if not weights_list:
+        return []
     total = sum(sizes)
     num_layers = len(weights_list[0])
     avg: List[np.ndarray] = []
@@ -160,6 +164,9 @@ class ShapeFlStrategy(fl.server.strategy.Strategy):
         self.gamma = gamma
         self.B_e = B_e or max(3, math.ceil(num_nodes / 3))
         self.T_max = T_max
+        self.cost_mode = "analytical"
+        self.lan_bandwidth_mbps = 100.0
+        self.delay_scale = 1.0
         self.topology = topology
         self.lr = lr
         self.momentum = momentum
@@ -181,9 +188,9 @@ class ShapeFlStrategy(fl.server.strategy.Strategy):
         self.output_dir: Optional[str] = None
         self._checkpoint_loaded = False
 
-        # CID mapping: Flower simulation uses large arbitrary CIDs,
-        # not 0..N-1.  Built on first configure_fit call.
-        self._cid_to_partition: Dict[int, int] = {}
+        # CID mapping: handles both simulation (integer CIDs) and
+        # deployment (UUID CIDs) via metrics-based registration.
+        self._cid_mapper = CidMapper(num_nodes)
 
         self.selected_edges: Set[int] = set()
         self.edge_nodes: Dict[int, List[int]] = {}
@@ -268,7 +275,7 @@ class ShapeFlStrategy(fl.server.strategy.Strategy):
             "cumulative_cost_gb": float(self.cumulative_cost_gb),
             "effective_cumulative_cost_gb": float(self.effective_cumulative_cost_gb),
             "metrics_history": self.metrics_history,
-            "cid_to_partition": {int(cid): int(node_id) for cid, node_id in self._cid_to_partition.items()},
+            "cid_to_partition": self._cid_mapper.to_checkpoint(),
             "model_size_bytes": int(self.model_size_bytes),
             "reported_paper_per_round_cost_gb": float(self._reported_paper_per_round_cost_gb),
             "reported_effective_per_round_cost_gb": float(self._reported_effective_per_round_cost_gb),
@@ -317,10 +324,9 @@ class ShapeFlStrategy(fl.server.strategy.Strategy):
         self.metrics_history.setdefault("effective_cumulative_cost_gb", list(self.metrics_history["cumulative_cost_gb"]))
         self.metrics_history.setdefault("model_payload_bytes", [])
         self.metrics_history.setdefault("probe_payload_bytes", [])
-        self._cid_to_partition = {
-            int(cid): int(node_id)
-            for cid, node_id in state.get("cid_to_partition", {}).items()
-        }
+        self._cid_mapper.from_checkpoint(
+            {str(cid): int(node_id) for cid, node_id in state.get("cid_to_partition", {}).items()}
+        )
         self.model_size_bytes = int(state.get("model_size_bytes", self.model_size_bytes))
         self._reported_paper_per_round_cost_gb = float(state.get("reported_paper_per_round_cost_gb", self.per_round_cost_gb))
         self._reported_effective_per_round_cost_gb = float(state.get("reported_effective_per_round_cost_gb", self.per_round_cost_gb))
@@ -371,8 +377,7 @@ class ShapeFlStrategy(fl.server.strategy.Strategy):
         loss, metrics = self.evaluate_fn(0, params, {})
         accuracy = metrics.get("accuracy", 0.0)
         self._record_completed_cloud_metrics(accuracy=accuracy, loss=loss)
-        if hasattr(self, "_persist_artifacts"):
-            self._persist_artifacts(completed=self._is_complete())
+        self._persist_artifacts(completed=self._is_complete())
         print(
             f"  [resume] Cloud Round {self.cloud_round}/{self.kappa} | "
             f"Acc: {accuracy:.4f} | Loss: {loss:.4f} | "
@@ -381,18 +386,26 @@ class ShapeFlStrategy(fl.server.strategy.Strategy):
         )
 
     def _resolve_node_id(self, cid: str) -> int:
-        """Map Flower's arbitrary CID to partition index 0..N-1."""
-        raw = int(cid)
-        if raw in self._cid_to_partition:
-            return self._cid_to_partition[raw]
-        return raw % self.num_nodes  # fallback
+        """Map Flower's CID (integer or UUID) to partition index 0..N-1."""
+        return self._cid_mapper.resolve(cid)
 
     def _build_cid_map(self, clients):
-        """Build CID→partition mapping on first call (once)."""
-        if self._cid_to_partition:
+        """Build CID→partition sort-order mapping on first call."""
+        self._cid_mapper.build_sort_order(clients)
+
+    def _inject_communication_delay(self, node_id: int, edge_id: int | None = None) -> None:
+        """Sleep proportional to topology cost when cost_mode == 'delayed'."""
+        if self.cost_mode != "delayed":
             return
-        sorted_cids = sorted(int(c.cid) for c in clients)
-        self._cid_to_partition = {cid: idx for idx, cid in enumerate(sorted_cids)}
+        if edge_id is not None and (node_id, edge_id) in self.c_ne:
+            cost_gb = self.c_ne[(node_id, edge_id)]
+        elif node_id in self.c_ec:
+            cost_gb = self.c_ec[node_id]
+        else:
+            return
+        delay = cost_gb * 1024.0 / self.lan_bandwidth_mbps * self.delay_scale
+        if delay > 0:
+            time.sleep(delay)
 
     def configure_fit(
         self, server_round: int, parameters: Parameters, client_manager: ClientManager,
@@ -421,6 +434,7 @@ class ShapeFlStrategy(fl.server.strategy.Strategy):
                 params = self.global_parameters
             else:
                 params = self.edge_parameters.get(edge_id, self.global_parameters)
+            self._inject_communication_delay(node_id, edge_id)
             fit_ins_list.append((client, FitIns(params, config)))
         return fit_ins_list
 
@@ -428,13 +442,14 @@ class ShapeFlStrategy(fl.server.strategy.Strategy):
         self, server_round: int, results: List[Tuple[ClientProxy, FitRes]],
         failures: List[Union[Tuple[ClientProxy, FitRes], BaseException]],
     ) -> Tuple[Optional[Parameters], Dict[str, Scalar]]:
+        for client_proxy, fit_res in results:
+            self._cid_mapper.register_from_metrics(client_proxy.cid, fit_res.metrics)
         if self.phase == "pretrain":
             aggregated = self._aggregate_pretrain(results)
         else:
             aggregated = self._aggregate_train(results)
         self.completed_flower_rounds += 1
-        if hasattr(self, "_persist_artifacts"):
-            self._persist_artifacts(completed=self._is_complete())
+        self._persist_artifacts(completed=self._is_complete())
         return aggregated
 
     def configure_evaluate(
@@ -462,6 +477,8 @@ class ShapeFlStrategy(fl.server.strategy.Strategy):
     ) -> Tuple[Optional[float], Dict[str, Scalar]]:
         if not results:
             return None, {}
+        for client_proxy, eval_res in results:
+            self._cid_mapper.register_from_metrics(client_proxy.cid, eval_res.metrics)
         total_examples = sum(r.num_examples for _, r in results)
         weighted_loss = sum(r.loss * r.num_examples for _, r in results) / total_examples
         weighted_acc = (
@@ -472,8 +489,7 @@ class ShapeFlStrategy(fl.server.strategy.Strategy):
             accuracy=weighted_acc,
             loss=weighted_loss,
         )
-        if hasattr(self, "_persist_artifacts"):
-            self._persist_artifacts(completed=self._is_complete())
+        self._persist_artifacts(completed=self._is_complete())
         print(
             f"  Cloud Round {self.cloud_round}/{self.kappa} | "
             f"Acc: {weighted_acc:.4f} | Loss: {weighted_loss:.4f} | "
@@ -510,8 +526,7 @@ class ShapeFlStrategy(fl.server.strategy.Strategy):
             accuracy=accuracy,
             loss=loss,
         )
-        if hasattr(self, "_persist_artifacts"):
-            self._persist_artifacts(completed=self._is_complete())
+        self._persist_artifacts(completed=self._is_complete())
         print(
             f"  Cloud Round {self.cloud_round}/{self.kappa} | "
             f"Acc: {accuracy:.4f} | Loss: {loss:.4f} | "
@@ -874,10 +889,10 @@ class ShapeFlStrategy(fl.server.strategy.Strategy):
         present_nodes = sorted(data_sizes.keys())
         N = len(present_nodes)
         num_edges = max(2, math.ceil(N / self.B_e))
-        np.random.seed(999)
+        _rng = np.random.default_rng(999)
         edge_list = sorted(
             np.array(present_nodes)[
-                np.random.choice(N, min(num_edges, N), replace=False)
+                _rng.choice(N, min(num_edges, N), replace=False)
             ].tolist()
         )
         self.selected_edges = set(edge_list)
@@ -950,6 +965,11 @@ class FedAvgFlatStrategy(fl.server.strategy.Strategy):
         self._current_round_local_epochs = local_epochs
         self.output_dir: Optional[str] = None
         self._checkpoint_loaded = False
+        self._cid_mapper = CidMapper(num_nodes)
+        self.cost_mode = "analytical"
+        self.lan_bandwidth_mbps = 100.0
+        self.delay_scale = 1.0
+        self.c_ec: Dict[int, float] = {}
         self.model_payload_bytes_per_round = 0
 
         self.per_round_cost_gb = 0.0
@@ -980,7 +1000,7 @@ class FedAvgFlatStrategy(fl.server.strategy.Strategy):
 
     def set_comm_costs(self, c_ec: Dict[int, float], model_size_bytes: Optional[int] = None):
         """Per-round cost for flat FedAvg (one-direction to match paper)."""
-        self.per_round_cost_gb = sum(c_ec[n] for n in range(self.num_nodes))
+        self.per_round_cost_gb = sum(c_ec.get(n, 0.0) for n in range(self.num_nodes))
         if model_size_bytes is not None:
             self.model_payload_bytes_per_round = int(model_size_bytes) * int(self.num_nodes)
 
@@ -1033,6 +1053,7 @@ class FedAvgFlatStrategy(fl.server.strategy.Strategy):
             "cumulative_cost_gb": float(self.cumulative_cost_gb),
             "metrics_history": self.metrics_history,
             "model_payload_bytes_per_round": int(self.model_payload_bytes_per_round),
+            "cid_to_partition": self._cid_mapper.to_checkpoint(),
             "numpy_rng_state": np.random.get_state(),
         }
         state.update(self._extra_checkpoint_state())
@@ -1055,6 +1076,9 @@ class FedAvgFlatStrategy(fl.server.strategy.Strategy):
         self.model_payload_bytes_per_round = int(state.get("model_payload_bytes_per_round", 0))
         if "numpy_rng_state" in state:
             np.random.set_state(state["numpy_rng_state"])
+        self._cid_mapper.from_checkpoint(
+            {str(cid): int(node_id) for cid, node_id in state.get("cid_to_partition", {}).items()}
+        )
         self._load_extra_checkpoint_state(state)
         self._checkpoint_loaded = True
 
@@ -1094,10 +1118,29 @@ class FedAvgFlatStrategy(fl.server.strategy.Strategy):
             f"CumCost: {self.cumulative_cost_gb:.4f} GB"
         )
 
+    def _resolve_node_id(self, cid: str) -> int:
+        return self._cid_mapper.resolve(cid)
+
+    def _build_cid_map(self, clients):
+        self._cid_mapper.build_sort_order(clients)
+
+    def _inject_communication_delay(self, node_id: int, edge_id: int | None = None) -> None:
+        """Sleep proportional to topology cost when cost_mode == 'delayed'."""
+        if self.cost_mode != "delayed":
+            return
+        if node_id in self.c_ec:
+            cost_gb = self.c_ec[node_id]
+        else:
+            return
+        delay = cost_gb * 1024.0 / self.lan_bandwidth_mbps * self.delay_scale
+        if delay > 0:
+            time.sleep(delay)
+
     def configure_fit(self, server_round, parameters, client_manager):
         clients = client_manager.sample(
             num_clients=self.num_nodes, min_num_clients=self.num_nodes,
         )
+        self._build_cid_map(clients)
         epochs_this_round = self.local_epochs
         if self.total_local_epochs is not None:
             remaining = self.total_local_epochs - self.completed_local_epochs
@@ -1111,13 +1154,21 @@ class FedAvgFlatStrategy(fl.server.strategy.Strategy):
         }
         if self.prox_mu > 0.0:
             config["prox_mu"] = self.prox_mu
-        return [(c, FitIns(self.global_parameters, config)) for c in clients]
+        fit_ins_list = []
+        for c in clients:
+            node_id = self._resolve_node_id(c.cid)
+            self._inject_communication_delay(node_id)
+            fit_ins_list.append((c, FitIns(self.global_parameters, config)))
+        return fit_ins_list
 
     def aggregate_fit(self, server_round, results, failures):
         weights_list, sizes = [], []
-        for _, fit_res in results:
+        for client_proxy, fit_res in results:
+            self._cid_mapper.register_from_metrics(client_proxy.cid, fit_res.metrics)
             weights_list.append(parameters_to_ndarrays(fit_res.parameters))
             sizes.append(fit_res.num_examples)
+        if not weights_list:
+            return self.global_parameters, {"round": server_round}
         avg = _weighted_average(weights_list, sizes)
         self.global_parameters = ndarrays_to_parameters(avg)
         self.cumulative_cost_gb += self.per_round_cost_gb
@@ -1160,19 +1211,13 @@ class FedAvgFlatStrategy(fl.server.strategy.Strategy):
     def aggregate_evaluate(self, server_round, results, failures):
         if not results:
             return None, {}
+        for client_proxy, eval_res in results:
+            self._cid_mapper.register_from_metrics(client_proxy.cid, eval_res.metrics)
         total_examples = sum(r.num_examples for _, r in results)
         weighted_loss = sum(r.loss * r.num_examples for _, r in results) / total_examples
         weighted_acc = (
             sum(r.metrics.get("accuracy", 0.0) * r.num_examples for _, r in results)
             / total_examples
-        )
-        self._record_metrics(server_round, weighted_acc, weighted_loss)
-        self._persist_artifacts(completed=self._is_complete())
-        round_id = int(self.completed_flower_rounds) if self._checkpoint_loaded else int(server_round)
-        print(
-            f"  Round {round_id}/{self.kappa} | "
-            f"Acc: {weighted_acc:.4f} | Loss: {weighted_loss:.4f} | "
-            f"CumCost: {self.cumulative_cost_gb:.4f} GB"
         )
         return weighted_loss, {"accuracy": weighted_acc}
 
@@ -1184,11 +1229,11 @@ class FedAvgFlatStrategy(fl.server.strategy.Strategy):
 
 
 class FedProxFlatStrategy(FedAvgFlatStrategy):
-    """
-    Flat FedProx baseline.
+    """Flat FedProx baseline.
 
-    Same topology/communication model as flat FedAvg, but clients optimize
-    the FedProx local objective with proximal coefficient ``prox_mu``.
+    Identical to FedAvgFlatStrategy — the proximal term is handled by
+    FedAvgFlatStrategy.configure_fit via the prox_mu parameter.
+    This class exists as a naming alias for the strategy factory.
     """
 
     def __init__(
@@ -1424,8 +1469,6 @@ class RoSEHFLStrategy(ShapeFlStrategy):
         self.current_edge_balance_deficit = 0.0
         self.current_client_distributions: Dict[int, np.ndarray] = {}
         self.current_hybrid_info: Dict[str, object] = {}
-        self._latest_client_weights: Dict[int, List[np.ndarray]] = {}
-        self._latest_client_sizes: Dict[int, int] = {}
         self._latest_probe_logits: Dict[int, np.ndarray] = {}
         self._latest_probe_payload_bytes: Dict[int, int] = {}
         self._current_cycle_reference_weights = parameters_to_ndarrays(self.initial_parameters)
@@ -2585,7 +2628,7 @@ class RoSEHFLStrategy(ShapeFlStrategy):
                 node_ids=group["nodes"],
                 weights_list=group["weights"],
                 sizes=group["sizes"],
-                phi=self.current_phi if self.current_phi else None,
+                phi=self.current_phi if self.current_phi is not None else None,
                 trim_ratio=self.agg_trim_ratio,
                 krum_f=self.krum_f,
                 beta=self.beta,
@@ -3252,6 +3295,7 @@ class RoSEHFLStrategy(ShapeFlStrategy):
                 class_prior = self._client_prior(node_id)
                 if class_prior is not None:
                     node_config["class_prior"] = self._serialise_class_prior(class_prior)
+                self._inject_communication_delay(node_id)
                 fit_ins_list.append((client, FitIns(self.global_parameters, node_config)))
             return fit_ins_list
 
@@ -3291,6 +3335,7 @@ class RoSEHFLStrategy(ShapeFlStrategy):
             class_prior = self._client_prior(node_id)
             if class_prior is not None:
                 node_config["class_prior"] = self._serialise_class_prior(class_prior)
+            self._inject_communication_delay(node_id, edge_id)
             fit_ins_list.append((client, FitIns(params, node_config)))
         return fit_ins_list
 
@@ -3300,6 +3345,8 @@ class RoSEHFLStrategy(ShapeFlStrategy):
         results: List[Tuple[ClientProxy, FitRes]],
         failures: List[Union[Tuple[ClientProxy, FitRes], BaseException]],
     ) -> Tuple[Optional[Parameters], Dict[str, Scalar]]:
+        for client_proxy, fit_res in results:
+            self._cid_mapper.register_from_metrics(client_proxy.cid, fit_res.metrics)
         if self.phase == "warmup":
             return self._aggregate_warmup(results)
         return self._aggregate_train_rose(results)
@@ -3439,7 +3486,7 @@ class RoSEHFLStrategy(ShapeFlStrategy):
                 node_ids=nodes,
                 weights_list=weights_list,
                 sizes=sizes,
-                phi=self.current_phi if self.current_phi else None,
+                phi=self.current_phi if self.current_phi is not None else None,
                 trim_ratio=self.agg_trim_ratio,
                 krum_f=self.krum_f,
                 beta=self.beta,
@@ -3623,7 +3670,11 @@ class RoSEHFLStrategy(ShapeFlStrategy):
     ) -> Tuple[Optional[float], Dict[str, Scalar]]:
         if not results:
             return None, {}
+        for client_proxy, eval_res in results:
+            self._cid_mapper.register_from_metrics(client_proxy.cid, eval_res.metrics)
         total_examples = sum(result.num_examples for _, result in results)
+        if total_examples == 0:
+            return None, {}
         weighted_loss = sum(result.loss * result.num_examples for _, result in results) / total_examples
         weighted_accuracy = sum(
             result.metrics.get("accuracy", 0.0) * result.num_examples

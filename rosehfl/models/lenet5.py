@@ -58,12 +58,3 @@ class LeNet5(nn.Module):
         x = F.relu(self.fc2(x))
         x = self.fc3(x)
         return x
-
-    def get_linear_layer_params(self) -> torch.Tensor:
-        """Flattened fc3 weights + biases (for ShapeFL similarity)."""
-        weight = self.fc3.weight.data.flatten()
-        bias = self.fc3.bias.data.flatten()
-        return torch.cat([weight, bias])
-
-    def get_linear_layer_size(self) -> int:
-        return self.fc3.weight.numel() + self.fc3.bias.numel()

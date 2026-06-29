@@ -50,12 +50,6 @@ DATASET_INFO = {
     },
 }
 
-DATASET_DEFAULT_MODEL = {
-    "fmnist": "lenet5",
-    "cifar10": "mobilenetv2",
-    "cifar100": "resnet18",
-}
-
 
 class FMNISTDataset(Dataset):
     """Fashion-MNIST dataset wrapper."""
@@ -239,7 +233,7 @@ def create_non_iid_partitions(
     - Divide dataset into shards of ``shard_size``
     - Each node gets ``shards_per_node`` shards from ``classes_per_node`` classes
     """
-    np.random.seed(seed)
+    _rng = np.random.default_rng(seed)
 
     if hasattr(dataset, "targets"):
         if isinstance(dataset.targets, torch.Tensor):
@@ -253,7 +247,7 @@ def create_non_iid_partitions(
     class_indices = {c: np.where(labels == c)[0].tolist() for c in range(num_classes)}
 
     for c in range(num_classes):
-        np.random.shuffle(class_indices[c])
+        _rng.shuffle(class_indices[c])
 
     class_shards = {}
     for c in range(num_classes):
@@ -271,7 +265,7 @@ def create_non_iid_partitions(
         if len(available_classes) < classes_per_node:
             selected_classes = available_classes
         else:
-            selected_classes = np.random.choice(
+            selected_classes = _rng.choice(
                 available_classes, classes_per_node, replace=False
             )
 
@@ -303,40 +297,6 @@ def get_node_dataloader(
     """Create a DataLoader for a specific node's data partition."""
     subset = Subset(dataset, indices)
     return DataLoader(subset, batch_size=batch_size, shuffle=shuffle)
-
-
-def save_partitions(partitions: Dict[int, List[int]], filepath: str):
-    """Save partitions to a JSON file."""
-    partitions_str = {str(k): v for k, v in partitions.items()}
-    directory = os.path.dirname(filepath)
-    if directory:
-        os.makedirs(directory, exist_ok=True)
-    with open(filepath, "w") as f:
-        json.dump(partitions_str, f)
-    print(f"Partitions saved to {filepath}")
-
-
-def load_partitions(filepath: str) -> Dict[int, List[int]]:
-    """Load partitions from a JSON file."""
-    with open(filepath, "r") as f:
-        partitions_str = json.load(f)
-    partitions = {int(k): v for k, v in partitions_str.items()}
-    print(f"Partitions loaded from {filepath}")
-    return partitions
-
-
-def get_data_distribution(dataset: Dataset, indices: List[int]) -> Dict[int, int]:
-    """Get the class distribution for a subset of the dataset."""
-    if hasattr(dataset, "targets"):
-        if isinstance(dataset.targets, torch.Tensor):
-            labels = dataset.targets[indices].numpy()
-        else:
-            labels = np.array(dataset.targets)[indices]
-    else:
-        labels = np.array([dataset[i][1] for i in indices])
-
-    unique, counts = np.unique(labels, return_counts=True)
-    return dict(zip(unique.tolist(), counts.tolist()))
 
 
 def get_partition_label_counts(

@@ -107,9 +107,8 @@ def _cost_to_target(accuracies: list[float], effective_costs: list[float], targe
 
 def _thresholds(target_accuracy: float | None, strategies: list[dict[str, Any]]) -> list[float]:
     max_accuracy = max(
-        max(strategy["metrics"]["accuracy"])
-        for strategy in strategies
-        if strategy["metrics"]["accuracy"]
+        (max(strategy["metrics"]["accuracy"]) for strategy in strategies if strategy["metrics"]["accuracy"]),
+        default=0.0,
     )
     if target_accuracy is None:
         floor = max(0.10, math.floor((max_accuracy - 0.20) * 20.0) / 20.0)

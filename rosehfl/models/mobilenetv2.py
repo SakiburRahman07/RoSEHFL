@@ -59,12 +59,12 @@ class MobileNetV2(nn.Module):
         (6, 320, 1, 1),
     ]
 
-    def __init__(self, num_classes: int = 10):
+    def __init__(self, num_classes: int = 10, input_channels: int = 3):
         super().__init__()
         self.linear_layer_name = "classifier"
 
         self.features = nn.Sequential(
-            nn.Conv2d(3, 32, 3, stride=1, padding=1, bias=False),
+            nn.Conv2d(input_channels, 32, 3, stride=1, padding=1, bias=False),
             nn.BatchNorm2d(32),
             nn.ReLU6(inplace=True),
         )
@@ -106,11 +106,3 @@ class MobileNetV2(nn.Module):
         x = x.view(x.size(0), -1)
         x = self.classifier(x)
         return x
-
-    def get_linear_layer_params(self) -> torch.Tensor:
-        weight = self.classifier.weight.data.flatten()
-        bias = self.classifier.bias.data.flatten()
-        return torch.cat([weight, bias])
-
-    def get_linear_layer_size(self) -> int:
-        return self.classifier.weight.numel() + self.classifier.bias.numel()
