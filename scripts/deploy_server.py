@@ -119,12 +119,17 @@ def main() -> None:
     )
 
     strategy = build_strategy(args.strategy, args, shared, args.output_dir)
+    strategy.output_dir = args.output_dir
 
     if args.cost_mode == "delayed":
         strategy.cost_mode = "delayed"
         strategy.lan_bandwidth_mbps = args.lan_bandwidth_mbps
         strategy.delay_scale = args.delay_scale
         logger.info(f"Delay mode: bandwidth={args.lan_bandwidth_mbps} Mbps, scale={args.delay_scale}")
+
+    # Set partition hash for checkpoint integrity verification
+    if hasattr(strategy, "set_partitions") and "partitions" in shared:
+        strategy.set_partitions(shared["partitions"], seed=args.seed)
 
     if args.resume and hasattr(strategy, "load_checkpoint_state"):
         checkpoint = load_checkpoint_if_available(args.output_dir)

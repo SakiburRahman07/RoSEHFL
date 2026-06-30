@@ -400,6 +400,11 @@ def run_strategy_bundle(
 ) -> dict[str, Any]:
     os.makedirs(output_dir, exist_ok=True)
     attach_strategy_output_dir(strategy, output_dir)
+
+    # Set partition hash for checkpoint integrity verification
+    if hasattr(strategy, "set_partitions") and "partitions" in shared:
+        strategy.set_partitions(shared["partitions"], seed=getattr(args, "seed", None))
+
     prior_summary = load_json(os.path.join(output_dir, "summary.json"), default={}) or {}
 
     if resume and hasattr(strategy, "load_checkpoint_state"):

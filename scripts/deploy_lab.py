@@ -137,8 +137,6 @@ def main() -> None:
     parser.add_argument("--delay-scale", type=float, default=1.0)
     parser.add_argument("--health-check-interval", type=float, default=30.0)
     parser.add_argument("--max-client-retries", type=int, default=3)
-    parser.add_argument("--output-dir", type=str, default=None)
-    parser.add_argument("--resume", action="store_true")
     parser.add_argument("--skip-sync", action="store_true",
                         help="Skip partition sync (use if partitions already exist on remote hosts).")
 

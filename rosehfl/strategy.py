@@ -18,10 +18,12 @@ Round semantics:
       optional stage/drift-triggered replanning.
 """
 
+import hashlib
 import math
 import os
 import pickle
 import time
+import warnings
 from collections import defaultdict
 import numpy as np
 import torch
@@ -125,6 +127,87 @@ def _weighted_average(
     return avg
 
 
+def _compute_partition_hash(partitions: Dict[int, list]) -> str:
+    """SHA-256 hash of partition indices for integrity verification."""
+    h = hashlib.sha256()
+    for node_id in sorted(partitions.keys()):
+        indices = sorted(int(i) for i in partitions[node_id])
+        h.update(f"{node_id}:".encode())
+        h.update(",".join(str(i) for i in indices).encode())
+        h.update(b"|")
+    return h.hexdigest()
+
+
+def _validate_checkpoint(
+    *,
+    state: Dict[str, object],
+    partitions: Optional[Dict[int, list]],
+    hyperparameters: Dict[str, object],
+    strategy_name: str,
+) -> None:
+    """Validate checkpoint integrity: partition hash + hyperparameters.
+
+    Raises ValueError on hard mismatches, issues warnings on soft mismatches.
+    Old checkpoints without these fields are silently accepted (migration).
+    """
+    # --- Partition hash ---
+    expected_hash = state.get("partition_hash")
+    if expected_hash is not None and partitions is not None:
+        actual_hash = _compute_partition_hash(partitions)
+        if expected_hash != actual_hash:
+            raise ValueError(
+                f"Checkpoint partition hash mismatch for {strategy_name}.\n"
+                f"  Expected: {expected_hash}\n"
+                f"  Actual:   {actual_hash}\n"
+                "The checkpoint was created with different data partitions.\n"
+                "Resume with the same --seed, --dataset, --num-nodes, "
+                "--shard-size, --shards-per-node, --classes-per-node."
+            )
+    elif expected_hash is None:
+        warnings.warn(
+            f"Checkpoint for {strategy_name} has no partition hash (old format). "
+            "Skipping partition integrity check.",
+            stacklevel=3,
+        )
+
+    # --- Hyperparameters ---
+    saved_hparams = state.get("hyperparameters")
+    if saved_hparams is not None:
+        critical_keys = [
+            "model_name", "dataset_name", "num_nodes", "topology", "seed",
+        ]
+        for key in critical_keys:
+            if key in saved_hparams and key in hyperparameters:
+                saved_val = saved_hparams[key]
+                current_val = hyperparameters[key]
+                if saved_val != current_val:
+                    raise ValueError(
+                        f"Checkpoint hyperparameter mismatch for {strategy_name}: "
+                        f"'{key}' changed from {saved_val!r} to {current_val!r}.\n"
+                        "Resume with the same configuration or remove the checkpoint."
+                    )
+        non_critical_keys = [
+            "kappa", "kappa_c", "kappa_e", "lr", "momentum",
+            "gamma_max", "B_e", "T_max",
+        ]
+        for key in non_critical_keys:
+            if key in saved_hparams and key in hyperparameters:
+                saved_val = saved_hparams[key]
+                current_val = hyperparameters[key]
+                if saved_val != current_val:
+                    warnings.warn(
+                        f"Checkpoint '{key}' changed from {saved_val!r} to {current_val!r}. "
+                        "Resuming with new value (may affect behavior).",
+                        stacklevel=3,
+                    )
+    elif saved_hparams is None:
+        warnings.warn(
+            f"Checkpoint for {strategy_name} has no hyperparameters (old format). "
+            "Skipping hyperparameter validation.",
+            stacklevel=3,
+        )
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 #  ShapeFlStrategy — baseline hierarchical implementation
 # ═══════════════════════════════════════════════════════════════════════════
@@ -191,6 +274,8 @@ class ShapeFlStrategy(fl.server.strategy.Strategy):
         # CID mapping: handles both simulation (integer CIDs) and
         # deployment (UUID CIDs) via metrics-based registration.
         self._cid_mapper = CidMapper(num_nodes)
+        self._partition_hash: Optional[str] = None
+        self._seed: Optional[int] = None
 
         self.selected_edges: Set[int] = set()
         self.edge_nodes: Dict[int, List[int]] = {}
@@ -285,6 +370,8 @@ class ShapeFlStrategy(fl.server.strategy.Strategy):
             "current_cycle_probe_payload_bytes": int(self.current_cycle_probe_payload_bytes),
             "current_cycle_effective_cost_gb": float(self.current_cycle_effective_cost_gb),
             "numpy_rng_state": np.random.get_state(),
+            "partition_hash": self._partition_hash,
+            "hyperparameters": self._get_hyperparameters(),
         }
 
     def load_checkpoint_state(self, state: Dict[str, object]) -> None:
@@ -337,6 +424,20 @@ class ShapeFlStrategy(fl.server.strategy.Strategy):
         self.current_cycle_effective_cost_gb = float(state.get("current_cycle_effective_cost_gb", 0.0))
         if "numpy_rng_state" in state:
             np.random.set_state(state["numpy_rng_state"])
+        _validate_checkpoint(
+            state=state,
+            partitions=None,
+            hyperparameters=self._get_hyperparameters(),
+            strategy_name="ShapeFlStrategy",
+        )
+        saved_hash = state.get("partition_hash")
+        if saved_hash is not None and self._partition_hash is not None:
+            if saved_hash != self._partition_hash:
+                raise ValueError(
+                    f"Partition hash mismatch: checkpoint {saved_hash[:16]}... "
+                    f"vs current {self._partition_hash[:16]}.... "
+                    "Resume with the same --seed, --dataset, --num-nodes."
+                )
         self._checkpoint_loaded = True
 
     def _persist_artifacts(self, completed: bool = False) -> None:
@@ -392,6 +493,32 @@ class ShapeFlStrategy(fl.server.strategy.Strategy):
     def _build_cid_map(self, clients):
         """Build CID→partition sort-order mapping on first call."""
         self._cid_mapper.build_sort_order(clients)
+
+    def set_partitions(self, partitions: Dict[int, list], seed: Optional[int] = None) -> None:
+        """Store partition hash for checkpoint integrity verification."""
+        self._partition_hash = _compute_partition_hash(partitions)
+        self._seed = seed
+
+    def _get_hyperparameters(self) -> Dict[str, object]:
+        """Collect hyperparameters for checkpoint storage."""
+        return {
+            "model_name": self.model_name,
+            "dataset_name": self.dataset_name,
+            "num_nodes": self.num_nodes,
+            "kappa_p": self.kappa_p,
+            "kappa_e": self.kappa_e,
+            "kappa_c": self.kappa_c,
+            "kappa": self.kappa,
+            "gamma": self.gamma,
+            "B_e": self.B_e,
+            "T_max": self.T_max,
+            "lr": self.lr,
+            "momentum": self.momentum,
+            "planning_mode": self.planning_mode,
+            "topology": self.topology,
+            "total_local_epochs": self.total_local_epochs,
+            "seed": self._seed,
+        }
 
     def _inject_communication_delay(self, node_id: int, edge_id: int | None = None) -> None:
         """Sleep proportional to topology cost when cost_mode == 'delayed'."""
@@ -966,6 +1093,8 @@ class FedAvgFlatStrategy(fl.server.strategy.Strategy):
         self.output_dir: Optional[str] = None
         self._checkpoint_loaded = False
         self._cid_mapper = CidMapper(num_nodes)
+        self._partition_hash: Optional[str] = None
+        self._seed: Optional[int] = None
         self.cost_mode = "analytical"
         self.lan_bandwidth_mbps = 100.0
         self.delay_scale = 1.0
@@ -1055,6 +1184,8 @@ class FedAvgFlatStrategy(fl.server.strategy.Strategy):
             "model_payload_bytes_per_round": int(self.model_payload_bytes_per_round),
             "cid_to_partition": self._cid_mapper.to_checkpoint(),
             "numpy_rng_state": np.random.get_state(),
+            "partition_hash": self._partition_hash,
+            "hyperparameters": self._get_hyperparameters(),
         }
         state.update(self._extra_checkpoint_state())
         return state
@@ -1080,6 +1211,20 @@ class FedAvgFlatStrategy(fl.server.strategy.Strategy):
             {str(cid): int(node_id) for cid, node_id in state.get("cid_to_partition", {}).items()}
         )
         self._load_extra_checkpoint_state(state)
+        _validate_checkpoint(
+            state=state,
+            partitions=None,
+            hyperparameters=self._get_hyperparameters(),
+            strategy_name="FedAvgFlatStrategy",
+        )
+        saved_hash = state.get("partition_hash")
+        if saved_hash is not None and self._partition_hash is not None:
+            if saved_hash != self._partition_hash:
+                raise ValueError(
+                    f"Partition hash mismatch: checkpoint {saved_hash[:16]}... "
+                    f"vs current {self._partition_hash[:16]}.... "
+                    "Resume with the same --seed, --dataset, --num-nodes."
+                )
         self._checkpoint_loaded = True
 
     def _persist_artifacts(self, completed: bool = False) -> None:
@@ -1123,6 +1268,22 @@ class FedAvgFlatStrategy(fl.server.strategy.Strategy):
 
     def _build_cid_map(self, clients):
         self._cid_mapper.build_sort_order(clients)
+
+    def set_partitions(self, partitions: Dict[int, list], seed: Optional[int] = None) -> None:
+        self._partition_hash = _compute_partition_hash(partitions)
+        self._seed = seed
+
+    def _get_hyperparameters(self) -> Dict[str, object]:
+        return {
+            "num_nodes": self.num_nodes,
+            "kappa": self.kappa,
+            "local_epochs": self.local_epochs,
+            "lr": self.lr,
+            "momentum": self.momentum,
+            "prox_mu": self.prox_mu,
+            "total_local_epochs": self.total_local_epochs,
+            "seed": self._seed,
+        }
 
     def _inject_communication_delay(self, node_id: int, edge_id: int | None = None) -> None:
         """Sleep proportional to topology cost when cost_mode == 'delayed'."""
@@ -1760,6 +1921,35 @@ class RoSEHFLStrategy(ShapeFlStrategy):
             "replan_count": int(self.replan_count),
         }
 
+    def _get_hyperparameters(self) -> Dict[str, object]:
+        base = super()._get_hyperparameters()
+        base.update({
+            "warmup_epochs": self.warmup_epochs,
+            "gamma_max": self.gamma_max,
+            "gamma_min": self.gamma_min,
+            "gamma_anneal": self.gamma_anneal,
+            "seed": self.seed,
+            "planning_signal": self.planning_signal,
+            "planning_objective": self.planning_objective,
+            "agg_rule": self.agg_rule,
+            "trust_use_shrinkage": self.trust_use_shrinkage,
+            "target_accuracy": self.target_accuracy,
+            "server_optimizer": self.server_optimizer,
+            "probe_emit_mode": self.probe_emit_mode,
+            "edge_swa_k": self.edge_swa_k,
+            "adaptive_gamma_eta": self.adaptive_gamma_eta,
+            "adaptive_gamma_target": self.adaptive_gamma_target,
+            "warm_start_replan": self.warm_start_replan,
+            "warm_start_threshold": self.warm_start_threshold,
+            "replan_cost_increase_tolerance": self.replan_cost_increase_tolerance,
+            "local_objective_prox_mu": self.local_objective_prox_mu,
+            "logit_adjustment_tau": self.logit_adjustment_tau,
+            "local_bn": self.local_bn,
+            "edge_underfill_penalty": self.edge_underfill_penalty,
+            "hard_edge_min_members": self.hard_edge_min_members,
+        })
+        return base
+
     def get_checkpoint_state(self) -> Dict[str, object]:
         return {
             "phase": self.phase,
@@ -1845,6 +2035,8 @@ class RoSEHFLStrategy(ShapeFlStrategy):
             "server_variance_state": self._weights_copy(self.server_variance_state),
             "server_optimizer_step": int(self.server_optimizer_step),
             "numpy_rng_state": np.random.get_state(),
+            "partition_hash": self._partition_hash,
+            "hyperparameters": self._get_hyperparameters(),
         }
 
     def load_checkpoint_state(self, state: Dict[str, object]) -> None:
@@ -1985,6 +2177,20 @@ class RoSEHFLStrategy(ShapeFlStrategy):
         self.server_optimizer_step = int(state.get("server_optimizer_step", 0))
         if "numpy_rng_state" in state:
             np.random.set_state(state["numpy_rng_state"])
+        _validate_checkpoint(
+            state=state,
+            partitions=None,
+            hyperparameters=self._get_hyperparameters(),
+            strategy_name="RoSEHFLStrategy",
+        )
+        saved_hash = state.get("partition_hash")
+        if saved_hash is not None and self._partition_hash is not None:
+            if saved_hash != self._partition_hash:
+                raise ValueError(
+                    f"Partition hash mismatch: checkpoint {saved_hash[:16]}... "
+                    f"vs current {self._partition_hash[:16]}.... "
+                    "Resume with the same --seed, --dataset, --num-nodes."
+                )
         self._checkpoint_loaded = True
 
     def _persist_artifacts(self, completed: bool = False) -> None:

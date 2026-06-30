@@ -127,7 +127,13 @@ def main() -> None:
     log_dir = args.log_dir or os.path.join(project_root, "logs")
     logger = setup_logging(log_dir, "client", args.node_id)
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = "cpu"
+    if torch.cuda.is_available():
+        try:
+            torch.zeros(1, device="cuda")
+            device = "cuda"
+        except Exception:
+            logger.warning("CUDA detected but not functional, falling back to CPU")
     logger.info(f"Node {args.node_id} starting | server={args.server_address} | device={device}")
 
     model = get_model(args.model, ds_info["num_classes"], ds_info["input_channels"], device)

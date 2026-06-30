@@ -102,8 +102,6 @@ def main() -> None:
     parser.add_argument("--client-gpu-sharing", type=str, default="round-robin",
                         choices=["round-robin", "sequential", "cpu"])
     parser.add_argument("--max-client-retries", type=int, default=3)
-    parser.add_argument("--output-dir", type=str, default=None)
-    parser.add_argument("--resume", action="store_true")
 
     args = parser.parse_args()
     if args.no_augment:
