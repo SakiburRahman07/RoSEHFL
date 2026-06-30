@@ -8,11 +8,11 @@ import torch
 from flwr.common import ndarrays_to_parameters
 from torch.utils.data import DataLoader, Dataset
 
-from shapefl.client import client_fn_factory
-from shapefl.data.data_loader import get_partition_label_counts
-from shapefl.strategy import RoSEHFLStrategy
-from shapefl.utils.seed import set_seed
-from shapefl.utils.shapley import build_probe_set
+from rosehfl.client import client_fn_factory
+from rosehfl.data.data_loader import get_partition_label_counts
+from rosehfl.strategy import RoSEHFLStrategy
+from rosehfl.utils.seed import set_seed
+from rosehfl.utils.shapley import build_probe_set
 
 
 class ToyDataset(Dataset):
@@ -44,7 +44,7 @@ class RoSESmokeTests(unittest.TestCase):
         test_loader = DataLoader(test_dataset, batch_size=4, shuffle=False)
 
         def model_factory():
-            from shapefl.models.lenet5 import LeNet5
+            from rosehfl.models.lenet5 import LeNet5
 
             return LeNet5(num_classes=10, input_channels=1)
 

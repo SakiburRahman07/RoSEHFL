@@ -1,5 +1,5 @@
-uv run python -m scripts/run_comparison.py --model lenet5 --dataset fmnist --num-nodes 30 --kappa-p 30 --kappa-e 1 --kappa-c 10 --kappa 50 --gamma 2800 --lr 0.001 --output-dir results/paper_comparison
+uv run python -m scripts/run_comparison.py --model lenet5      --dataset fmnist   --num-nodes 30 --kappa-p 30 --kappa-e 1 --kappa-c 10 --kappa 50 --gamma 2800 --lr 0.001 --output-dir results/paper_comparison
 
-uv run python -m scripts/run_comparison.py --model mobilenetv2 --dataset cifar10 --num-nodes 30 --kappa-p 30 --kappa-e 1 --kappa-c 10 --kappa 50 --gamma 2800 --lr 0.001 --output-dir results/paper_cifar10
+uv run python -m scripts/run_comparison.py --model mobilenetv2 --dataset cifar10  --num-nodes 30 --kappa-p 30 --kappa-e 1 --kappa-c 10 --kappa 50 --gamma 2800 --lr 0.001 --output-dir results/paper_cifar10
 
-uv run python -m scripts/run_comparison.py --model resnet18 --dataset cifar100 --num-nodes 30 --kappa-p 30 --kappa-e 1 --kappa-c 10 --kappa 50 --gamma 2800 --lr 0.001 --output-dir results/paper_cifar100
+uv run python -m scripts/run_comparison.py --model resnet18    --dataset cifar100 --num-nodes 30 --kappa-p 30 --kappa-e 1 --kappa-c 10 --kappa 50 --gamma 2800 --lr 0.001 --output-dir results/paper_cifar100

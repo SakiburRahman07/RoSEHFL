@@ -9,7 +9,7 @@ import argparse
 import math
 import os
 
-from shapefl.strategy import RoSEHFLStrategy
+from rosehfl.strategy import RoSEHFLStrategy
 
 from ._rose_common import prepare_shared_context, run_strategy, timestamped_dir, write_summary_json
 
@@ -57,7 +57,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
-    from shapefl.data.data_loader import DATASET_INFO
+    from rosehfl.data.data_loader import DATASET_INFO
 
     ds_info = DATASET_INFO[args.dataset]
     if args.shards_per_node is None:

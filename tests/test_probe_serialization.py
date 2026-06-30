@@ -2,7 +2,7 @@ import unittest
 
 import numpy as np
 
-from shapefl.utils.shapley import add_gaussian_noise, deserialize_probe_logits, serialize_probe_logits
+from rosehfl.utils.shapley import add_gaussian_noise, deserialize_probe_logits, serialize_probe_logits
 
 
 class ProbeSerializationTests(unittest.TestCase):

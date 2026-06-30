@@ -6,8 +6,8 @@ from __future__ import annotations
 
 from flwr.common import ndarrays_to_parameters, parameters_to_ndarrays
 
-from shapefl.strategy import FedAvgFlatStrategy, _weighted_average
-from shapefl.utils.shapley import compute_smc_shapley, normalise_shapley
+from rosehfl.strategy import FedAvgFlatStrategy, _weighted_average
+from rosehfl.utils.shapley import compute_smc_shapley, normalise_shapley
 
 
 class GTGShapleyFlatStrategy(FedAvgFlatStrategy):
@@ -32,6 +32,12 @@ class GTGShapleyFlatStrategy(FedAvgFlatStrategy):
         self.shapley_K = int(shapley_K)
         self.seed = int(seed)
         self.shapley_history = []
+
+    def _extra_checkpoint_state(self):
+        return {"shapley_history": list(self.shapley_history)}
+
+    def _load_extra_checkpoint_state(self, state):
+        self.shapley_history = list(state.get("shapley_history", []))
 
     def aggregate_fit(self, server_round, results, failures):
         client_weights = {}
@@ -62,6 +68,8 @@ class GTGShapleyFlatStrategy(FedAvgFlatStrategy):
         self.global_parameters = ndarrays_to_parameters(aggregate)
         self.cumulative_cost_gb += self.per_round_cost_gb
         self.completed_local_epochs += self._current_round_local_epochs
+        self.completed_flower_rounds += 1
         self.shapley_history.append({"round": server_round, "phi": phi})
+        self._persist_artifacts(completed=self._is_complete())
         return self.global_parameters, {"round": server_round}
 

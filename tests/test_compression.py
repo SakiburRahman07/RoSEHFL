@@ -2,7 +2,7 @@ import unittest
 
 import numpy as np
 
-from shapefl.utils.compression import compress_weight_update, decompress_layers
+from rosehfl.utils.compression import compress_weight_update, decompress_layers
 
 
 class CompressionTests(unittest.TestCase):
