@@ -40,7 +40,7 @@ def load_host_config(path: str) -> dict:
         return yaml.safe_load(f)
 
 
-def build_ssh_cmd(host: str, node_id: int, server_ip: str, port: int, args, remote_dir: str) -> str:
+def build_ssh_cmd(host: str, node_id: int, server_ip: str, port: int, args, remote_dir: str, ssh_key: str = "") -> str:
     cmd = (
         f"cd {shlex.quote(remote_dir)} && "
         f"python -m scripts.deploy_client "
@@ -57,9 +57,8 @@ def build_ssh_cmd(host: str, node_id: int, server_ip: str, port: int, args, remo
     )
     if args.augment:
         cmd += " --augment"
-    # NOTE: StrictHostKeyChecking=no is intentional for lab Pi nodes that may
-    # be re-provisioned. Do not use for production SSH connections.
-    return f"ssh -o StrictHostKeyChecking=no {host} '{cmd}'"
+    key_flag = f"-i {shlex.quote(ssh_key)} " if ssh_key else ""
+    return f"ssh {key_flag}-o StrictHostKeyChecking=no {host} '{cmd}'"
 
 
 def build_server_cmd(args, output_dir: str) -> List[str]:
@@ -95,23 +94,25 @@ def build_server_cmd(args, output_dir: str) -> List[str]:
     return cmd
 
 
-def sync_partitions_to_host(host: str, partitions_dir: str, remote_dir: str, logger) -> None:
+def sync_partitions_to_host(host: str, partitions_dir: str, remote_dir: str, logger, ssh_key: str = "") -> None:
     logger.info(f"Syncing partitions to {host}")
     remote_partitions = f"{host}:{remote_dir}/partitions/"
-    result = subprocess.run(
-        ["rsync", "-avz", "--ignore-errors", f"{partitions_dir}/", remote_partitions],
-        capture_output=True, text=True, timeout=60,
-    )
+    rsync_cmd = ["rsync", "-avz", "--ignore-errors"]
+    if ssh_key:
+        rsync_cmd.extend(["-e", f"ssh -i {ssh_key} -o StrictHostKeyChecking=no"])
+    rsync_cmd.extend([f"{partitions_dir}/", remote_partitions])
+    result = subprocess.run(rsync_cmd, capture_output=True, text=True, timeout=60)
     if result.returncode != 0:
         logger.warning(f"rsync to {host} returned {result.returncode}: {result.stderr}")
     else:
         logger.info(f"Partitions synced to {host}")
 
 
-def check_host_health(host: str) -> bool:
+def check_host_health(host: str, ssh_key: str = "") -> bool:
     try:
+        key_flag = ["-i", ssh_key] if ssh_key else []
         result = subprocess.run(
-            ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
+            ["ssh"] + key_flag + ["-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
              host, "echo", "alive"],
             capture_output=True, text=True, timeout=15,
         )
@@ -139,6 +140,8 @@ def main() -> None:
     parser.add_argument("--max-client-retries", type=int, default=3)
     parser.add_argument("--skip-sync", action="store_true",
                         help="Skip partition sync (use if partitions already exist on remote hosts).")
+    parser.add_argument("--ssh-key", type=str, default="",
+                        help="Path to SSH private key for connecting to remote hosts (e.g., ~/.ssh/ssh_rosehfl).")
 
     args = parser.parse_args()
     if args.no_augment:
@@ -197,7 +200,7 @@ def main() -> None:
     if not args.skip_sync:
         for host_entry in hosts:
             host = host_entry["address"]
-            sync_partitions_to_host(host, partitions_dir, args.remote_dir, logger)
+            sync_partitions_to_host(host, partitions_dir, args.remote_dir, logger, args.ssh_key)
 
     # Start server
     server_cmd = build_server_cmd(args, args.output_dir)
@@ -217,7 +220,7 @@ def main() -> None:
     for host_entry in hosts:
         host = host_entry["address"]
         for node_id in host_entry["node_ids"]:
-            ssh_cmd = build_ssh_cmd(host, node_id, server_ip, args.port, args, args.remote_dir)
+            ssh_cmd = build_ssh_cmd(host, node_id, server_ip, args.port, args, args.remote_dir, args.ssh_key)
             logger.info(f"Launching client {node_id} on {host}")
             proc = subprocess.Popen(
                 ssh_cmd, shell=True,
@@ -243,7 +246,7 @@ def main() -> None:
                             f"restarting (attempt {client_retries[node_id]}/{args.max_client_retries})"
                         )
                         time.sleep(10 * client_retries[node_id])
-                        ssh_cmd = build_ssh_cmd(host, node_id, server_ip, args.port, args, args.remote_dir)
+                        ssh_cmd = build_ssh_cmd(host, node_id, server_ip, args.port, args, args.remote_dir, args.ssh_key)
                         client_procs[node_id] = subprocess.Popen(
                             ssh_cmd, shell=True,
                             stdout=open(os.path.join(args.output_dir, "logs", f"client_{node_id}_stdout.log"), "a"),
@@ -260,7 +263,7 @@ def main() -> None:
             if time.time() - last_health_check > args.health_check_interval:
                 for host_entry in hosts:
                     host = host_entry["address"]
-                    if not check_host_health(host):
+                    if not check_host_health(host, args.ssh_key):
                         logger.error(f"Host {host} unreachable!")
                 last_health_check = time.time()
 
@@ -292,12 +295,13 @@ def main() -> None:
                 proc.kill()
 
     # Collect remote logs
+    key_flag = ["-i", args.ssh_key] if args.ssh_key else []
     for host_entry in hosts:
         host = host_entry["address"]
         for node_id in host_entry["node_ids"]:
             try:
                 subprocess.run(
-                    ["scp", "-o", "StrictHostKeyChecking=no",
+                    ["scp"] + key_flag + ["-o", "StrictHostKeyChecking=no",
                      f"{host}:~/rosehfl_logs/client_{node_id}.log",
                      os.path.join(args.output_dir, "logs", f"client_{node_id}.log")],
                     timeout=30, capture_output=True,
