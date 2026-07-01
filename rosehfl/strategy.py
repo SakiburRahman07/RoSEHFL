@@ -447,6 +447,11 @@ class ShapeFlStrategy(fl.server.strategy.Strategy):
         save_json(self._status_payload(completed), os.path.join(self.output_dir, "status.json"))
         with open(os.path.join(self.output_dir, "checkpoint.pkl"), "wb") as handle:
             pickle.dump(self.get_checkpoint_state(), handle)
+        try:
+            from .utils.visualization import generate_live_dashboard
+            generate_live_dashboard(self.metrics_history, self.output_dir)
+        except Exception:
+            pass
 
     # ════════════════════════════════════════════════════════════════════
     #  Strategy interface
@@ -1234,6 +1239,11 @@ class FedAvgFlatStrategy(fl.server.strategy.Strategy):
         save_json(self._status_payload(completed), os.path.join(self.output_dir, "status.json"))
         with open(os.path.join(self.output_dir, "checkpoint.pkl"), "wb") as handle:
             pickle.dump(self.get_checkpoint_state(), handle)
+        try:
+            from .utils.visualization import generate_live_dashboard
+            generate_live_dashboard(self.metrics_history, self.output_dir)
+        except Exception:
+            pass
 
     def initialize_parameters(self, client_manager):
         if self._checkpoint_loaded:
@@ -2203,6 +2213,11 @@ class RoSEHFLStrategy(ShapeFlStrategy):
         save_json(self._status_payload(completed), os.path.join(self.output_dir, "status.json"))
         with open(os.path.join(self.output_dir, "checkpoint.pkl"), "wb") as handle:
             pickle.dump(self.get_checkpoint_state(), handle)
+        try:
+            from .utils.visualization import generate_live_dashboard
+            generate_live_dashboard(self.metrics_history, self.output_dir)
+        except Exception:
+            pass
 
     def _is_complete(self) -> bool:
         if self.total_local_epochs is not None and self.completed_local_epochs >= self.total_local_epochs:

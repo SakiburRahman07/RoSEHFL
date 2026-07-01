@@ -578,3 +578,68 @@ def visualize_comparison(
     generate_html_report(output_dir, config, summary, is_comparison=True,
                          target_accuracy=target_accuracy)
     print("[Visualization] Done.\n")
+
+
+def generate_live_dashboard(metrics: Dict[str, List], output_dir: str) -> None:
+    """Generate a live dashboard PNG from current metrics. Called after each round."""
+    rounds = metrics.get("cloud_round") or metrics.get("round", [])
+    if not rounds:
+        return
+
+    accs = metrics.get("accuracy", [])
+    losses = metrics.get("loss", [])
+    paper_costs = metrics.get("paper_cumulative_cost_gb", [])
+    effective_costs = metrics.get("effective_cumulative_cost_gb", [])
+    per_round_costs = metrics.get("paper_per_round_cost_gb", [])
+
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    fig.suptitle(f"Live Dashboard — Round {rounds[-1]}", fontsize=16, fontweight="bold")
+
+    # Accuracy
+    ax = axes[0, 0]
+    if accs:
+        ax.plot(rounds, [a * 100 for a in accs], "o-", color="#1f77b4", linewidth=2, markersize=5)
+        ax.set_ylabel("Accuracy (%)")
+        ax.set_xlabel("Cloud Round")
+        ax.set_title("Test Accuracy")
+        ax.grid(True, alpha=0.3)
+        ax.set_ylim(0, 100)
+        ax.annotate(f"{accs[-1]*100:.1f}%", xy=(rounds[-1], accs[-1]*100),
+                    xytext=(5, 5), textcoords="offset points", fontsize=11, fontweight="bold")
+
+    # Loss
+    ax = axes[0, 1]
+    if losses:
+        ax.plot(rounds, losses, "s-", color="#d62728", linewidth=2, markersize=5)
+        ax.set_ylabel("Loss")
+        ax.set_xlabel("Cloud Round")
+        ax.set_title("Test Loss")
+        ax.grid(True, alpha=0.3)
+        ax.annotate(f"{losses[-1]:.3f}", xy=(rounds[-1], losses[-1]),
+                    xytext=(5, 5), textcoords="offset points", fontsize=11, fontweight="bold")
+
+    # Cumulative cost
+    ax = axes[1, 0]
+    if paper_costs:
+        ax.plot(rounds, paper_costs, "^-", color="#2ca02c", linewidth=2, markersize=5, label="Paper cost")
+        if effective_costs:
+            ax.plot(rounds, effective_costs, "D--", color="#ff7f0e", linewidth=2, markersize=5, label="Effective cost")
+        ax.set_ylabel("Cumulative Cost (GB)")
+        ax.set_xlabel("Cloud Round")
+        ax.set_title("Communication Cost")
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+
+    # Per-round cost
+    ax = axes[1, 1]
+    if per_round_costs:
+        ax.bar(range(len(per_round_costs)), per_round_costs, color="#9467bd", alpha=0.8)
+        ax.set_ylabel("Cost (GB)")
+        ax.set_xlabel("Cloud Round")
+        ax.set_title("Per-Round Cost")
+        ax.grid(True, alpha=0.3, axis="y")
+
+    plt.tight_layout()
+    dashboard_path = os.path.join(output_dir, "live_dashboard.png")
+    fig.savefig(dashboard_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
