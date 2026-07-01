@@ -235,6 +235,7 @@ class ShapeFlStrategy(fl.server.strategy.Strategy):
         topology: str = "geant2010",
         node_label_counts: Optional[Dict[int, np.ndarray]] = None,
         total_local_epochs: Optional[int] = None,
+        target_accuracy: Optional[float] = None,
     ):
         super().__init__()
         self.model_name = model_name
@@ -257,6 +258,7 @@ class ShapeFlStrategy(fl.server.strategy.Strategy):
         self.evaluate_fn = evaluate_fn
         self.node_label_counts = node_label_counts
         self.total_local_epochs = total_local_epochs
+        self.target_accuracy = None if target_accuracy is None else float(target_accuracy)
 
         self.initial_parameters = initial_parameters
         self.global_parameters = initial_parameters
@@ -321,6 +323,9 @@ class ShapeFlStrategy(fl.server.strategy.Strategy):
     def _is_complete(self) -> bool:
         if self.total_local_epochs is not None and self.completed_local_epochs < self.total_local_epochs:
             return False
+        if self.target_accuracy is not None and self.metrics_history.get("accuracy"):
+            if self.metrics_history["accuracy"][-1] >= self.target_accuracy:
+                return True
         return self.completed_flower_rounds >= self.total_flower_rounds
 
     def _status_payload(self, completed: bool) -> Dict[str, object]:
@@ -1080,6 +1085,7 @@ class FedAvgFlatStrategy(fl.server.strategy.Strategy):
         total_local_epochs: Optional[int] = None,
         initial_parameters: Parameters = None,
         evaluate_fn: Optional[Callable] = None,
+        target_accuracy: Optional[float] = None,
     ):
         super().__init__()
         self.num_nodes = num_nodes
@@ -1089,6 +1095,7 @@ class FedAvgFlatStrategy(fl.server.strategy.Strategy):
         self.momentum = momentum
         self.prox_mu = prox_mu
         self.total_local_epochs = total_local_epochs
+        self.target_accuracy = None if target_accuracy is None else float(target_accuracy)
         self.initial_parameters = initial_parameters
         self.global_parameters = initial_parameters
         self.evaluate_fn = evaluate_fn
@@ -1141,6 +1148,9 @@ class FedAvgFlatStrategy(fl.server.strategy.Strategy):
     def _is_complete(self) -> bool:
         if self.total_local_epochs is not None and self.completed_local_epochs < self.total_local_epochs:
             return False
+        if self.target_accuracy is not None and self.metrics_history.get("accuracy"):
+            if self.metrics_history["accuracy"][-1] >= self.target_accuracy:
+                return True
         return self.completed_flower_rounds >= self.total_flower_rounds
 
     def _record_metrics(self, server_round: int, accuracy: float, loss: float) -> None:

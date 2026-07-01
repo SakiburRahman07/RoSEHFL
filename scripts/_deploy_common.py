@@ -94,7 +94,9 @@ def ensure_partitions(partitions_dir: str, dataset: str, num_nodes: int,
         with open(metadata_path) as f:
             meta = json.load(f)
         if (meta.get("dataset") == dataset and meta.get("num_nodes") == num_nodes
-                and meta.get("seed") == seed):
+                and meta.get("seed") == seed and meta.get("shard_size") == shard_size
+                and meta.get("shards_per_node") == shards_per_node
+                and meta.get("classes_per_node") == classes_per_node):
             return
 
     from .generate_partitions import generate_partition_files

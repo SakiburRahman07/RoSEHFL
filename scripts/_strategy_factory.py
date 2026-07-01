@@ -385,6 +385,7 @@ def build_strategy(name: str, args, shared, output_dir: str):
             evaluate_fn=shared["evaluate_fn"],
             node_label_counts=shared["node_label_counts"],
             total_local_epochs=_arg(args, "total_local_epochs", None),
+            target_accuracy=_arg(args, "target_accuracy", None),
         )
     if name == "fedavg":
         strategy = FedAvgFlatStrategy(
@@ -396,6 +397,7 @@ def build_strategy(name: str, args, shared, output_dir: str):
             total_local_epochs=_arg(args, "total_local_epochs", None),
             initial_parameters=shared["initial_parameters"],
             evaluate_fn=shared["evaluate_fn"],
+            target_accuracy=_arg(args, "target_accuracy", None),
         )
         c_ec, model_size_bytes = _flat_strategy_comm_costs(args, shared)
         strategy.set_comm_costs(c_ec, model_size_bytes=model_size_bytes)
@@ -411,6 +413,22 @@ def build_strategy(name: str, args, shared, output_dir: str):
             total_local_epochs=_arg(args, "total_local_epochs", None),
             initial_parameters=shared["initial_parameters"],
             evaluate_fn=shared["evaluate_fn"],
+            target_accuracy=_arg(args, "target_accuracy", None),
+        )
+        c_ec, model_size_bytes = _flat_strategy_comm_costs(args, shared)
+        strategy.set_comm_costs(c_ec, model_size_bytes=model_size_bytes)
+        return strategy
+    if name == "gtg_shapley":
+        strategy = GTGShapleyFlatStrategy(
+            num_nodes=args.num_nodes,
+            kappa=args.kappa,
+            local_epochs=args.kappa_c * args.kappa_e,
+            lr=args.lr,
+            momentum=args.momentum,
+            total_local_epochs=_arg(args, "total_local_epochs", None),
+            initial_parameters=shared["initial_parameters"],
+            evaluate_fn=shared["evaluate_fn"],
+            target_accuracy=_arg(args, "target_accuracy", None),
         )
         c_ec, model_size_bytes = _flat_strategy_comm_costs(args, shared)
         strategy.set_comm_costs(c_ec, model_size_bytes=model_size_bytes)
@@ -431,6 +449,7 @@ def build_strategy(name: str, args, shared, output_dir: str):
             shapley_T=_arg(args, "shapley_T", 4),
             shapley_K=_arg(args, "shapley_K", 6),
             seed=args.seed,
+            target_accuracy=_arg(args, "target_accuracy", None),
         )
         c_ec, model_size_bytes = _flat_strategy_comm_costs(args, shared)
         strategy.set_comm_costs(c_ec, model_size_bytes=model_size_bytes)
@@ -446,6 +465,7 @@ def build_strategy(name: str, args, shared, output_dir: str):
             initial_parameters=shared["initial_parameters"],
             evaluate_fn=shared["evaluate_fn"],
             q=_arg(args, "q_fedavg_q", 2.0),
+            target_accuracy=_arg(args, "target_accuracy", None),
         )
         c_ec, model_size_bytes = _flat_strategy_comm_costs(args, shared)
         strategy.set_comm_costs(c_ec, model_size_bytes=model_size_bytes)
