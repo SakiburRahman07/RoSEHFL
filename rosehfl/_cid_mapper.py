@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 
 class CidMapper:
@@ -37,7 +40,12 @@ class CidMapper:
         """
         if cid in self.cid_to_node_id:
             return self.cid_to_node_id[cid]
-        return self._sort_order_index(cid)
+        node_id = self._sort_order_index(cid)
+        logger.warning(
+            "CID %s resolved via sort-order to node_id=%d (no metrics yet). ",
+            cid[:12], node_id,
+        )
+        return node_id
 
     def _sort_order_index(self, cid: str) -> int:
         if self._sorted_cids is None or cid not in self._sorted_cids:

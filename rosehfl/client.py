@@ -63,6 +63,9 @@ class FlClient(fl.client.NumPyClient):
             for index, key in enumerate(self._state_keys)
         ]
 
+    def get_properties(self, config=None) -> Dict[str, object]:
+        return {"node_id": int(self.node_id) if self.node_id is not None else -1}
+
     def set_parameters(self, parameters: NDArrays) -> None:
         self._server_parameters = [np.asarray(value).copy() for value in parameters]
         current_state = OrderedDict(self.model.state_dict())
