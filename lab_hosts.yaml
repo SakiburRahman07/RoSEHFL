@@ -1,29 +1,29 @@
 server:
-  local_ip: 192.168.1.100
+  local_ip: 192.168.0.100
   port: 8080
 
 hosts:
-  - address: pi@192.168.1.101
+  - address: pi@192.168.0.101
     node_ids: [0]
-  - address: pi@192.168.1.102
+  - address: pi@192.168.0.102
     node_ids: [1]
-  - address: pi@192.168.1.103
+  - address: pi@192.168.0.103
     node_ids: [2]
-  - address: pi@192.168.1.104
+  - address: pi@192.168.0.104
     node_ids: [3]
-  - address: pi@192.168.1.105
+  - address: pi@192.168.0.105
     node_ids: [4]
-  - address: pi@192.168.1.106
+  - address: pi@192.168.0.106
     node_ids: [5]
-  - address: pi@192.168.1.107
+  - address: pi@192.168.0.107
     node_ids: [6]
-  - address: pi@192.168.1.108
+  - address: pi@192.168.0.108
     node_ids: [7]
-  - address: pi@192.168.1.109
+  - address: pi@192.168.0.109
     node_ids: [8]
-  - address: pi@192.168.1.110
+  - address: pi@192.168.0.110
     node_ids: [9]
-  - address: pi@192.168.1.111
+  - address: pi@192.168.0.111
     node_ids: [10]
-  - address: pi@192.168.1.112
+  - address: pi@192.168.0.112
     node_ids: [11]
