@@ -43,7 +43,7 @@ def load_host_config(path: str) -> dict:
 def build_ssh_cmd(host: str, node_id: int, server_ip: str, port: int, args, remote_dir: str, ssh_key: str = "") -> str:
     cmd = (
         f"cd {shlex.quote(remote_dir)} && "
-        f"python -m scripts.deploy_client "
+        f".venv/bin/python -m scripts.deploy_client "
         f"--node-id {node_id} "
         f"--server-address {shlex.quote(f'{server_ip}:{port}')} "
         f"--model {shlex.quote(args.model)} --dataset {shlex.quote(args.dataset)} "
