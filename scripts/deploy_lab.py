@@ -241,6 +241,7 @@ def main() -> None:
     # Supervise
     try:
         while server_proc.poll() is None:
+            restarted_any = False
             for node_id, proc in list(client_procs.items()):
                 if proc.poll() is not None:
                     if proc.returncode != 0 and client_retries[node_id] < args.max_client_retries:
@@ -250,19 +251,21 @@ def main() -> None:
                             f"Client {node_id} on {host} exited (code {proc.returncode}), "
                             f"restarting (attempt {client_retries[node_id]}/{args.max_client_retries})"
                         )
-                        time.sleep(10 * client_retries[node_id])
                         ssh_cmd = build_ssh_cmd(host, node_id, server_ip, args.port, args, args.remote_dir, args.ssh_key)
                         client_procs[node_id] = subprocess.Popen(
                             ssh_cmd,
                             stdout=open(os.path.join(args.output_dir, "logs", f"client_{node_id}_stdout.log"), "a"),
                             stderr=subprocess.STDOUT,
                         )
+                        restarted_any = True
                     elif proc.returncode == 0:
                         logger.info(f"Client {node_id} finished")
                         del client_procs[node_id]
                     else:
                         logger.error(f"Client {node_id} exhausted retries")
                         del client_procs[node_id]
+            if restarted_any:
+                time.sleep(3)  # Brief pause so server can accept new connections
             time.sleep(5)
 
         if server_proc.returncode == 0:

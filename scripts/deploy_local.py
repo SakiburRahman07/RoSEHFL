@@ -190,6 +190,7 @@ def main() -> None:
     # Supervise
     try:
         while server_proc.poll() is None:
+            restarted_any = False
             for node_id, proc in list(client_procs.items()):
                 if proc.poll() is not None:
                     if proc.returncode != 0 and client_retries[node_id] < args.max_client_retries:
@@ -198,7 +199,6 @@ def main() -> None:
                             f"Client {node_id} exited with code {proc.returncode}, "
                             f"restarting (attempt {client_retries[node_id]}/{args.max_client_retries})"
                         )
-                        time.sleep(5)
                         env = os.environ.copy()
                         if args.client_gpu_sharing == "cpu":
                             env["CUDA_VISIBLE_DEVICES"] = ""
@@ -212,12 +212,15 @@ def main() -> None:
                             stdout=open(os.path.join(args.output_dir, "logs", f"client_{node_id}_stdout.log"), "a"),
                             stderr=subprocess.STDOUT,
                         )
+                        restarted_any = True
                     elif proc.returncode == 0:
                         logger.info(f"Client {node_id} finished successfully")
                         del client_procs[node_id]
                     else:
                         logger.error(f"Client {node_id} exhausted retries, removing")
                         del client_procs[node_id]
+            if restarted_any:
+                time.sleep(3)
             time.sleep(5)
 
         # Server done
