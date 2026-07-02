@@ -31,6 +31,7 @@ from typing import Callable, Dict, List, Optional, Set, Tuple, Union
 
 import flwr as fl
 from flwr.common import (
+    GetPropertiesIns,
     Parameters,
     FitIns,
     FitRes,
@@ -503,8 +504,19 @@ class ShapeFlStrategy(fl.server.strategy.Strategy):
         return self._cid_mapper.resolve(cid)
 
     def _build_cid_map(self, clients):
-        """Build CID→partition sort-order mapping on first call."""
+        """Build CID→partition mapping. Tries client properties first, then sort-order."""
         self._cid_mapper.build_sort_order(clients)
+        for client in clients:
+            cid = client.cid
+            if str(cid) in self._cid_mapper.cid_to_node_id:
+                continue  # already registered via metrics
+            try:
+                props = client.get_properties(GetPropertiesIns(), timeout=3)
+                self._cid_mapper.register_from_metrics(
+                    str(cid), dict(props.properties) if props.properties else {}
+                )
+            except Exception:
+                pass  # client may not support get_properties, fall through to sort-order
 
     def set_partitions(self, partitions: Dict[int, list], seed: Optional[int] = None) -> None:
         """Store partition hash for checkpoint integrity verification."""
@@ -1291,7 +1303,19 @@ class FedAvgFlatStrategy(fl.server.strategy.Strategy):
         return self._cid_mapper.resolve(cid)
 
     def _build_cid_map(self, clients):
+        """Build CID→partition mapping. Tries client properties first, then sort-order."""
         self._cid_mapper.build_sort_order(clients)
+        for client in clients:
+            cid = client.cid
+            if str(cid) in self._cid_mapper.cid_to_node_id:
+                continue
+            try:
+                props = client.get_properties(GetPropertiesIns(), timeout=3)
+                self._cid_mapper.register_from_metrics(
+                    str(cid), dict(props.properties) if props.properties else {}
+                )
+            except Exception:
+                pass
 
     def set_partitions(self, partitions: Dict[int, list], seed: Optional[int] = None) -> None:
         self._partition_hash = _compute_partition_hash(partitions)
