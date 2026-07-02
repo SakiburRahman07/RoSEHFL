@@ -115,7 +115,7 @@ def _load_weights_into_model(
         raise ValueError(
             f"_load_weights_into_model: expected {len(keys)} arrays, got {len(weights)}"
         )
-    state_dict = {key: torch.as_tensor(value) for key, value in zip(keys, weights)}
+    state_dict = {key: torch.as_tensor(value.copy()) for key, value in zip(keys, weights)}
     model.load_state_dict(state_dict, strict=True)
     return model
 
@@ -164,7 +164,7 @@ def mean_softmax_distribution(logits: np.ndarray) -> np.ndarray:
     """Return the mean softmax distribution over the probe set."""
     if logits.size == 0:
         return np.zeros((0,), dtype=np.float32)
-    logits_tensor = torch.as_tensor(logits, dtype=torch.float32)
+    logits_tensor = torch.as_tensor(np.ascontiguousarray(logits), dtype=torch.float32)
     probs = F.softmax(logits_tensor, dim=1).mean(dim=0)
     probs = probs / probs.sum().clamp_min(1e-12)
     return probs.cpu().numpy().astype(np.float64)

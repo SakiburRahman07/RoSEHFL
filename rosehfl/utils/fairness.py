@@ -18,7 +18,7 @@ def load_weights_into_model(
     """Load numpy parameters into a freshly constructed model."""
     state_keys = list(model.state_dict().keys())
     state_dict = {
-        key: torch.as_tensor(value)
+        key: torch.as_tensor(value.copy())
         for key, value in zip(state_keys, parameters_ndarrays)
     }
     model.load_state_dict(state_dict, strict=True)

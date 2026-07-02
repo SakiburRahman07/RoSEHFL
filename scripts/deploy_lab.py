@@ -111,29 +111,6 @@ def sync_partitions_to_host(host: str, partitions_dir: str, remote_dir: str, log
         logger.info(f"Partitions synced to {host}")
 
 
-import platform
-import subprocess
-
-
-def _ping_host(host: str, timeout: float = 3.0) -> bool:
-    """Lightweight host check via ping — no SSH overhead on the remote device."""
-    try:
-        host_addr = host.split("@")[-1] if "@" in host else host
-        if platform.system() == "Windows":
-            result = subprocess.run(
-                ["ping", "-n", "1", "-w", str(int(timeout * 1000)), host_addr],
-                capture_output=True, timeout=timeout + 2,
-            )
-        else:
-            result = subprocess.run(
-                ["ping", "-c", "1", "-W", str(int(timeout)), host_addr],
-                capture_output=True, timeout=timeout + 2,
-            )
-        return result.returncode == 0
-    except Exception:
-        return False
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="RoSEHFL multi-machine lab deployment orchestrator",
@@ -149,7 +126,6 @@ def main() -> None:
     parser.add_argument("--cost-mode", type=str, default="analytical", choices=["analytical", "delayed"])
     parser.add_argument("--lan-bandwidth-mbps", type=float, default=100.0)
     parser.add_argument("--delay-scale", type=float, default=1.0)
-    parser.add_argument("--health-check-interval", type=float, default=30.0)
     parser.add_argument("--max-client-retries", type=int, default=3)
     parser.add_argument("--skip-sync", action="store_true",
                         help="Skip partition sync (use if partitions already exist on remote hosts).")
@@ -225,6 +201,20 @@ def main() -> None:
     )
     time.sleep(5)
 
+    # Clean up any leftover client processes from previous runs
+    logger.info("Cleaning up old processes on all Pis...")
+    for host_entry in hosts:
+        host = host_entry["address"]
+        kill_cmd = ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=5"]
+        if args.ssh_key:
+            kill_cmd.extend(["-i", args.ssh_key])
+        kill_cmd.extend([host, "pkill -f deploy_client 2>/dev/null; echo cleaned"])
+        try:
+            subprocess.run(kill_cmd, capture_output=True, timeout=10)
+        except Exception:
+            pass
+    logger.info("Cleanup complete")
+
     # Launch remote clients
     client_procs: Dict[int, subprocess.Popen] = {}
     client_retries: Dict[int, int] = {}
@@ -247,7 +237,6 @@ def main() -> None:
 
     # Supervise
     try:
-        last_health_check = time.time()
         while server_proc.poll() is None:
             for node_id, proc in list(client_procs.items()):
                 if proc.poll() is not None:
@@ -271,15 +260,6 @@ def main() -> None:
                     else:
                         logger.error(f"Client {node_id} exhausted retries")
                         del client_procs[node_id]
-
-            # Periodic health check
-            if time.time() - last_health_check > args.health_check_interval:
-                for host_entry in hosts:
-                    host = host_entry["address"]
-                    if not _ping_host(host):
-                        logger.warning(f"Host {host} unreachable!")
-                last_health_check = time.time()
-
             time.sleep(5)
 
         if server_proc.returncode == 0:
@@ -295,6 +275,18 @@ def main() -> None:
         server_proc.wait()
         for proc in client_procs.values():
             proc.wait()
+        # Kill remote clients
+        for host_entry in hosts:
+            host = host_entry["address"]
+            kill_cmd = ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=5"]
+            if args.ssh_key:
+                kill_cmd.extend(["-i", args.ssh_key])
+            kill_cmd.extend([host, "pkill -f deploy_client 2>/dev/null"])
+            try:
+                subprocess.run(kill_cmd, capture_output=True, timeout=10)
+            except Exception:
+                pass
+        logger.info("Shutdown complete")
 
     # Kill remaining clients
     for node_id, proc in client_procs.items():
