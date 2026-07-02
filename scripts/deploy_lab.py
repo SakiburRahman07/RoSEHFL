@@ -40,9 +40,9 @@ def load_host_config(path: str) -> dict:
         return yaml.safe_load(f)
 
 
-def build_ssh_cmd(host: str, node_id: int, server_ip: str, port: int, args, remote_dir: str, ssh_key: str = "") -> str:
-    cmd = (
-        f"cd {shlex.quote(remote_dir)} && "
+def build_ssh_cmd(host: str, node_id: int, server_ip: str, port: int, args, remote_dir: str, ssh_key: str = "") -> List[str]:
+    remote_cmd = (
+        f"cd {remote_dir} && "
         f".venv/bin/python -m scripts.deploy_client "
         f"--node-id {node_id} "
         f"--server-address {shlex.quote(f'{server_ip}:{port}')} "
@@ -56,9 +56,12 @@ def build_ssh_cmd(host: str, node_id: int, server_ip: str, port: int, args, remo
         f"--seed {args.seed}"
     )
     if args.augment:
-        cmd += " --augment"
-    key_flag = f"-i {shlex.quote(ssh_key)} " if ssh_key else ""
-    return f"ssh {key_flag}-o StrictHostKeyChecking=no {host} '{cmd}'"
+        remote_cmd += " --augment"
+    ssh_args = ["ssh", "-o", "StrictHostKeyChecking=no"]
+    if ssh_key:
+        ssh_args.extend(["-i", ssh_key])
+    ssh_args.extend([host, remote_cmd])
+    return ssh_args
 
 
 def build_server_cmd(args, output_dir: str) -> List[str]:
@@ -108,15 +111,25 @@ def sync_partitions_to_host(host: str, partitions_dir: str, remote_dir: str, log
         logger.info(f"Partitions synced to {host}")
 
 
-def check_host_health(host: str, ssh_key: str = "") -> bool:
+import platform
+import subprocess
+
+
+def _ping_host(host: str, timeout: float = 3.0) -> bool:
+    """Lightweight host check via ping — no SSH overhead on the remote device."""
     try:
-        key_flag = ["-i", ssh_key] if ssh_key else []
-        result = subprocess.run(
-            ["ssh"] + key_flag + ["-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
-             host, "echo", "alive"],
-            capture_output=True, text=True, timeout=15,
-        )
-        return result.returncode == 0 and "alive" in result.stdout
+        host_addr = host.split("@")[-1] if "@" in host else host
+        if platform.system() == "Windows":
+            result = subprocess.run(
+                ["ping", "-n", "1", "-w", str(int(timeout * 1000)), host_addr],
+                capture_output=True, timeout=timeout + 2,
+            )
+        else:
+            result = subprocess.run(
+                ["ping", "-c", "1", "-W", str(int(timeout)), host_addr],
+                capture_output=True, timeout=timeout + 2,
+            )
+        return result.returncode == 0
     except Exception:
         return False
 
@@ -223,7 +236,7 @@ def main() -> None:
             ssh_cmd = build_ssh_cmd(host, node_id, server_ip, args.port, args, args.remote_dir, args.ssh_key)
             logger.info(f"Launching client {node_id} on {host}")
             proc = subprocess.Popen(
-                ssh_cmd, shell=True,
+                ssh_cmd,
                 stdout=open(os.path.join(args.output_dir, "logs", f"client_{node_id}_stdout.log"), "w"),
                 stderr=subprocess.STDOUT,
             )
@@ -248,7 +261,7 @@ def main() -> None:
                         time.sleep(10 * client_retries[node_id])
                         ssh_cmd = build_ssh_cmd(host, node_id, server_ip, args.port, args, args.remote_dir, args.ssh_key)
                         client_procs[node_id] = subprocess.Popen(
-                            ssh_cmd, shell=True,
+                            ssh_cmd,
                             stdout=open(os.path.join(args.output_dir, "logs", f"client_{node_id}_stdout.log"), "a"),
                             stderr=subprocess.STDOUT,
                         )
@@ -263,8 +276,8 @@ def main() -> None:
             if time.time() - last_health_check > args.health_check_interval:
                 for host_entry in hosts:
                     host = host_entry["address"]
-                    if not check_host_health(host, args.ssh_key):
-                        logger.error(f"Host {host} unreachable!")
+                    if not _ping_host(host):
+                        logger.warning(f"Host {host} unreachable!")
                 last_health_check = time.time()
 
             time.sleep(5)
