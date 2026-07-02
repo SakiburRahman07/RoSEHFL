@@ -67,6 +67,8 @@ def add_common_experiment_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--byz-mode", type=str, default="none", choices=["none", "label_flip", "sign_flip", "gaussian"])
     parser.add_argument("--gaussian-sigma", type=float, default=0.5)
 
+    parser.add_argument("--min-fit-clients", type=int, default=None,
+                        help="Minimum clients required per round (default: all)")
     parser.add_argument("--output-dir", type=str, default=None)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--seed", type=int, default=42)

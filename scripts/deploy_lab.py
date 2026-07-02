@@ -94,6 +94,7 @@ def build_server_cmd(args, output_dir: str) -> List[str]:
     if args.cost_mode == "delayed":
         cmd.extend(["--lan-bandwidth-mbps", str(args.lan_bandwidth_mbps),
                     "--delay-scale", str(args.delay_scale)])
+    cmd.extend(["--round-timeout", str(args.round_timeout)])
     return cmd
 
 
@@ -127,6 +128,8 @@ def main() -> None:
     parser.add_argument("--lan-bandwidth-mbps", type=float, default=100.0)
     parser.add_argument("--delay-scale", type=float, default=1.0)
     parser.add_argument("--max-client-retries", type=int, default=3)
+    parser.add_argument("--round-timeout", type=float, default=300.0,
+                        help="Seconds before a training round times out if clients don't respond.")
     parser.add_argument("--skip-sync", action="store_true",
                         help="Skip partition sync (use if partitions already exist on remote hosts).")
     parser.add_argument("--ssh-key", type=str, default="",

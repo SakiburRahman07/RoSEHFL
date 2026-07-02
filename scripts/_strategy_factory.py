@@ -414,6 +414,7 @@ def build_strategy(name: str, args, shared, output_dir: str):
             initial_parameters=shared["initial_parameters"],
             evaluate_fn=shared["evaluate_fn"],
             target_accuracy=_arg(args, "target_accuracy", None),
+            min_fit_clients=_arg(args, "min_fit_clients", None),
         )
         c_ec, model_size_bytes = _flat_strategy_comm_costs(args, shared)
         strategy.set_comm_costs(c_ec, model_size_bytes=model_size_bytes)

@@ -236,6 +236,7 @@ class ShapeFlStrategy(fl.server.strategy.Strategy):
         node_label_counts: Optional[Dict[int, np.ndarray]] = None,
         total_local_epochs: Optional[int] = None,
         target_accuracy: Optional[float] = None,
+        min_fit_clients: Optional[int] = None,
     ):
         super().__init__()
         self.model_name = model_name
@@ -259,6 +260,7 @@ class ShapeFlStrategy(fl.server.strategy.Strategy):
         self.node_label_counts = node_label_counts
         self.total_local_epochs = total_local_epochs
         self.target_accuracy = None if target_accuracy is None else float(target_accuracy)
+        self.min_fit_clients = min_fit_clients if min_fit_clients is not None else self.num_nodes
 
         self.initial_parameters = initial_parameters
         self.global_parameters = initial_parameters
@@ -548,7 +550,7 @@ class ShapeFlStrategy(fl.server.strategy.Strategy):
         self, server_round: int, parameters: Parameters, client_manager: ClientManager,
     ) -> List[Tuple[ClientProxy, FitIns]]:
         clients = client_manager.sample(
-            num_clients=self.num_nodes, min_num_clients=self.num_nodes,
+            num_clients=self.num_nodes, min_num_clients=self.min_fit_clients,
         )
         self._build_cid_map(clients)
 
@@ -604,7 +606,7 @@ class ShapeFlStrategy(fl.server.strategy.Strategy):
         if self.cloud_round == 0:
             return []
         clients = client_manager.sample(
-            num_clients=self.num_nodes, min_num_clients=self.num_nodes,
+            num_clients=self.num_nodes, min_num_clients=self.min_fit_clients,
         )
         return [(c, EvaluateIns(self.global_parameters, {})) for c in clients]
 
@@ -1086,6 +1088,7 @@ class FedAvgFlatStrategy(fl.server.strategy.Strategy):
         initial_parameters: Parameters = None,
         evaluate_fn: Optional[Callable] = None,
         target_accuracy: Optional[float] = None,
+        min_fit_clients: Optional[int] = None,
     ):
         super().__init__()
         self.num_nodes = num_nodes
@@ -1096,6 +1099,7 @@ class FedAvgFlatStrategy(fl.server.strategy.Strategy):
         self.prox_mu = prox_mu
         self.total_local_epochs = total_local_epochs
         self.target_accuracy = None if target_accuracy is None else float(target_accuracy)
+        self.min_fit_clients = min_fit_clients if min_fit_clients is not None else self.num_nodes
         self.initial_parameters = initial_parameters
         self.global_parameters = initial_parameters
         self.evaluate_fn = evaluate_fn
@@ -1319,7 +1323,7 @@ class FedAvgFlatStrategy(fl.server.strategy.Strategy):
 
     def configure_fit(self, server_round, parameters, client_manager):
         clients = client_manager.sample(
-            num_clients=self.num_nodes, min_num_clients=self.num_nodes,
+            num_clients=self.num_nodes, min_num_clients=self.min_fit_clients,
         )
         self._build_cid_map(clients)
         epochs_this_round = self.local_epochs
@@ -1385,7 +1389,7 @@ class FedAvgFlatStrategy(fl.server.strategy.Strategy):
         if self.evaluate_fn is not None:
             return []
         clients = client_manager.sample(
-            num_clients=self.num_nodes, min_num_clients=self.num_nodes,
+            num_clients=self.num_nodes, min_num_clients=self.min_fit_clients,
         )
         return [(c, EvaluateIns(self.global_parameters, {})) for c in clients]
 
@@ -3497,7 +3501,7 @@ class RoSEHFLStrategy(ShapeFlStrategy):
     ) -> List[Tuple[ClientProxy, FitIns]]:
         clients = client_manager.sample(
             num_clients=self.num_nodes,
-            min_num_clients=self.num_nodes,
+            min_num_clients=self.min_fit_clients,
         )
         self._build_cid_map(clients)
 
@@ -3889,7 +3893,7 @@ class RoSEHFLStrategy(ShapeFlStrategy):
             return []
         clients = client_manager.sample(
             num_clients=self.num_nodes,
-            min_num_clients=self.num_nodes,
+            min_num_clients=self.min_fit_clients,
         )
         return [(client, EvaluateIns(self.global_parameters, {})) for client in clients]
 

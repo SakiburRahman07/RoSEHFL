@@ -66,6 +66,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Compute and write fairness report after training.")
     parser.add_argument("--client-wait-timeout", type=float, default=300.0,
                         help="Seconds to wait for all clients to connect before starting.")
+    parser.add_argument("--round-timeout", type=float, default=300.0,
+                        help="Seconds before a training round times out (0 = no timeout).")
     return parser
 
 
@@ -148,7 +150,7 @@ def main() -> None:
     start_time = time.time()
     fl.server.start_server(
         server_address=args.address,
-        config=fl.server.ServerConfig(num_rounds=total_rounds),
+        config=fl.server.ServerConfig(num_rounds=total_rounds, round_timeout=args.round_timeout if args.round_timeout > 0 else None),
         strategy=strategy,
     )
     elapsed = time.time() - start_time
