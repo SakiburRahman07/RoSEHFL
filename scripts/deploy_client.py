@@ -153,9 +153,13 @@ def main() -> None:
         class_prior=class_prior,
     )
 
-    for attempt in range(1, args.max_retries + 1):
+    consecutive_failures = 0
+    attempt = 0
+    while True:
+        attempt += 1
+        start_time = time.time()
         try:
-            logger.info(f"Connecting to server (attempt {attempt}/{args.max_retries})")
+            logger.info(f"Connecting to server (attempt {attempt})")
             fl.client.start_client(
                 server_address=args.server_address,
                 client=client.to_client(),
@@ -163,12 +167,15 @@ def main() -> None:
             logger.info(f"Node {args.node_id} finished")
             return
         except Exception as e:
-            logger.error(f"Connection failed (attempt {attempt}): {e}")
-            if attempt < args.max_retries:
-                time.sleep(args.retry_delay * attempt)
-            else:
-                logger.error("Max retries reached, giving up")
+            uptime = time.time() - start_time
+            if uptime >= 30:
+                consecutive_failures = 0
+            consecutive_failures += 1
+            logger.error(f"Connection failed (attempt {attempt}, uptime {uptime:.0f}s): {e}")
+            if consecutive_failures >= args.max_retries:
+                logger.error("Max consecutive rapid failures reached, giving up")
                 raise
+            time.sleep(args.retry_delay * consecutive_failures)
 
 
 if __name__ == "__main__":
