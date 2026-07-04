@@ -16,9 +16,43 @@ import json
 import os
 import time
 
+import grpc
 import torch
 from torch.utils.data import DataLoader, Subset
 import flwr as fl
+
+
+def _patch_grpc_keepalive() -> None:
+    """Inject client-side keepalive options into all gRPC channels.
+
+    Flower creates channels via grpc.insecure_channel/grpc.secure_channel
+    but sets no keepalive options. During CPU-bound training on Pi, the gRPC
+    thread is starved and misses the server's keepalive window, causing
+    GOAWAY ping_timeout disconnects. This patch makes the CLIENT send pings
+    every 60s so the server knows it's alive.
+    """
+    _orig_insecure = grpc.insecure_channel
+    _orig_secure = grpc.secure_channel
+
+    _keepalive = [
+        ("grpc.keepalive_time_ms", 60000),
+        ("grpc.keepalive_timeout_ms", 30000),
+        ("grpc.keepalive_permit_without_calls", 1),
+        ("grpc.http2.min_time_between_pings_ms", 30000),
+        ("grpc.http2.max_pings_without_data", 100),
+    ]
+
+    def _insecure(address, options=None, **kw):
+        return _orig_insecure(address, options=list(options or []) + _keepalive, **kw)
+
+    def _secure(address, creds, options=None, **kw):
+        return _orig_secure(address, creds, options=list(options or []) + _keepalive, **kw)
+
+    grpc.insecure_channel = _insecure
+    grpc.secure_channel = _secure
+
+
+_patch_grpc_keepalive()
 
 from rosehfl.models.factory import get_model
 from rosehfl.data.data_loader import load_data, DATASET_INFO
@@ -105,10 +139,10 @@ def main() -> None:
     parser.add_argument("--augment", action="store_true")
     parser.add_argument("--no-augment", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--max-retries", type=int, default=3,
-                        help="Connection retry attempts before giving up.")
-    parser.add_argument("--retry-delay", type=float, default=10.0,
-                        help="Seconds to wait between retries.")
+    parser.add_argument("--max-retries", type=int, default=15,
+                        help="Total connection retry attempts before giving up.")
+    parser.add_argument("--retry-delay", type=float, default=15.0,
+                        help="Base seconds to wait between retries (multiplied by attempt number, capped at 120s).")
     parser.add_argument("--log-dir", type=str, default=None,
                         help="Directory for log files (default: ./logs).")
 
@@ -153,7 +187,6 @@ def main() -> None:
         class_prior=class_prior,
     )
 
-    consecutive_failures = 0
     attempt = 0
     while True:
         attempt += 1
@@ -168,14 +201,13 @@ def main() -> None:
             return
         except Exception as e:
             uptime = time.time() - start_time
-            if uptime >= 30:
-                consecutive_failures = 0
-            consecutive_failures += 1
             logger.error(f"Connection failed (attempt {attempt}, uptime {uptime:.0f}s): {e}")
-            if consecutive_failures >= args.max_retries:
-                logger.error("Max consecutive rapid failures reached, giving up")
+            if attempt >= args.max_retries:
+                logger.error("Max retries reached, giving up")
                 raise
-            time.sleep(args.retry_delay * consecutive_failures)
+            delay = min(args.retry_delay * attempt, 120.0)
+            logger.info(f"Retrying in {delay:.0f}s...")
+            time.sleep(delay)
 
 
 if __name__ == "__main__":

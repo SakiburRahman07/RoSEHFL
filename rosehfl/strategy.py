@@ -3978,3 +3978,30 @@ class RoSEHFLStrategy(ShapeFlStrategy):
             f"EffectiveCost: {self.effective_cumulative_cost_gb:.4f} GB"
         )
         return loss, metrics
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  RoseHFL — RoSE-Q1S without counterproductive server optimizer and FedProx
+# ═════════════════════════════════════════════════════════════════════════════
+
+class RoseHFLStrategy(RoSEHFLStrategy):
+    """RoSE-HFL simplified: removes FedAdam and FedProx which amplified zigzag.
+
+    Keeps: compression, trust aggregation, replanning, adaptive gamma, SWA.
+    Removes: FedAdam server optimizer (use plain weighted FedAvg),
+             FedProx proximal regularization (mu=0).
+    """
+
+    def __init__(self, **kwargs):
+        kwargs.setdefault("server_optimizer", "none")
+        kwargs.setdefault("local_objective_prox_mu", 0.0)
+        super().__init__(**kwargs)
+
+    def _apply_server_optimizer(
+        self,
+        *,
+        reference_weights: List[np.ndarray],
+        aggregated_weights: List[np.ndarray],
+        update_state: bool,
+    ) -> List[np.ndarray]:
+        return self._weights_copy(aggregated_weights)

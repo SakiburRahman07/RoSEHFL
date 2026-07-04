@@ -18,10 +18,35 @@ import argparse
 import os
 import time
 
+import grpc as _grpc
 import flwr as fl
 
 from rosehfl.data.data_loader import DATASET_INFO
 from rosehfl.utils.seed import set_seed
+
+
+def _patch_server_grpc_keepalive() -> None:
+    """Inject server-side keepalive options into the gRPC server.
+
+    Flower's default keepalive_timeout_ms is 20s — too short when clients
+    are CPU-bound training on Raspberry Pi and can't respond to HTTP/2 PINGs
+    in time. This raises the timeout to 120s and enables keepalive pings
+    even without active calls.
+    """
+    _orig_server = _grpc.server
+    _extra = [
+        ("grpc.keepalive_permit_without_calls", 1),
+        ("grpc.keepalive_timeout_ms", 120000),
+        ("grpc.http2.min_time_between_pings_ms", 30000),
+    ]
+
+    def _server_with_keepalive(*args, options=None, **kw):
+        return _orig_server(*args, options=list(options or []) + _extra, **kw)
+
+    _grpc.server = _server_with_keepalive
+
+
+_patch_server_grpc_keepalive()
 
 try:
     from ._cli_args import add_common_experiment_args, add_single_strategy_arg
