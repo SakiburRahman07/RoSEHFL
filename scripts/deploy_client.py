@@ -16,43 +16,9 @@ import json
 import os
 import time
 
-import grpc
 import torch
 from torch.utils.data import DataLoader, Subset
 import flwr as fl
-
-
-def _patch_grpc_keepalive() -> None:
-    """Inject client-side keepalive options into all gRPC channels.
-
-    Flower creates channels via grpc.insecure_channel/grpc.secure_channel
-    but sets no keepalive options. During CPU-bound training on Pi, the gRPC
-    thread is starved and misses the server's keepalive window, causing
-    GOAWAY ping_timeout disconnects. This patch makes the CLIENT send pings
-    every 60s so the server knows it's alive.
-    """
-    _orig_insecure = grpc.insecure_channel
-    _orig_secure = grpc.secure_channel
-
-    _keepalive = [
-        ("grpc.keepalive_time_ms", 60000),
-        ("grpc.keepalive_timeout_ms", 30000),
-        ("grpc.keepalive_permit_without_calls", 1),
-        ("grpc.http2.min_time_between_pings_ms", 30000),
-        ("grpc.http2.max_pings_without_data", 100),
-    ]
-
-    def _insecure(address, options=None, **kw):
-        return _orig_insecure(address, options=list(options or []) + _keepalive, **kw)
-
-    def _secure(address, creds, options=None, **kw):
-        return _orig_secure(address, creds, options=list(options or []) + _keepalive, **kw)
-
-    grpc.insecure_channel = _insecure
-    grpc.secure_channel = _secure
-
-
-_patch_grpc_keepalive()
 
 from rosehfl.models.factory import get_model
 from rosehfl.data.data_loader import load_data, DATASET_INFO
