@@ -6,8 +6,8 @@ from __future__ import annotations
 
 from flwr.common import ndarrays_to_parameters, parameters_to_ndarrays
 
-from rosehfl.strategy import FedAvgFlatStrategy, _weighted_average
-from rosehfl.utils.shapley import compute_smc_shapley, normalise_shapley
+from src.strategy import FedAvgFlatStrategy, _weighted_average
+from src.utils.shapley import compute_smc_shapley, normalise_shapley
 
 
 class GTGShapleyFlatStrategy(FedAvgFlatStrategy):

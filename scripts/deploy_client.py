@@ -20,10 +20,10 @@ import torch
 from torch.utils.data import DataLoader, Subset
 import flwr as fl
 
-from rosehfl.models.factory import get_model
-from rosehfl.data.data_loader import load_data, DATASET_INFO
-from rosehfl.client import FlClient
-from rosehfl.utils.shapley import build_probe_set
+from src.models.factory import get_model
+from src.data.data_loader import load_data, DATASET_INFO
+from src.client import FlClient
+from src.utils.shapley import build_probe_set
 from scripts._deploy_common import setup_logging
 
 
@@ -41,7 +41,7 @@ def _load_node_partition(args, project_root: str):
             indices = json.load(f)
     else:
         # Fallback: create all partitions in-memory (single-machine mode)
-        from rosehfl.data.data_loader import create_non_iid_partitions
+        from src.data.data_loader import create_non_iid_partitions
         partitions = create_non_iid_partitions(
             train_dataset, args.num_nodes, args.shard_size,
             args.shards_per_node, args.classes_per_node, seed=args.seed,

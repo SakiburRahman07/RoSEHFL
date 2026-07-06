@@ -11,8 +11,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from rosehfl.data.data_loader import DATASET_INFO
-from rosehfl.utils.json_utils import NumpyEncoder
+from src.data.data_loader import DATASET_INFO
+from src.utils.json_utils import NumpyEncoder
 
 from ._rose_common import (
     load_checkpoint_if_available,
@@ -197,19 +197,19 @@ def build_strategy_summary(
         "final_accuracy": final_metric(metrics, "accuracy"),
         "best_accuracy": max([float(value) for value in metrics.get("accuracy", [])], default=None),
         "final_loss": final_metric(metrics, "loss"),
-        "final_paper_cost_gb": final_metric(metrics, "paper_cumulative_cost_gb") or final_metric(metrics, "cumulative_cost_gb"),
-        "final_effective_cost_gb": final_metric(metrics, "effective_cumulative_cost_gb") or final_metric(metrics, "cumulative_cost_gb"),
-        "paper_per_round_cost_gb": per_round_cost(metrics, mode="paper"),
-        "effective_per_round_cost_gb": per_round_cost(metrics, mode="effective"),
-        "paper_cost_to_target_gb": cost_to_target(metrics, target_accuracy, mode="paper"),
-        "effective_cost_to_target_gb": cost_to_target(metrics, target_accuracy, mode="effective"),
+        "final_baseline_cost_gb": final_metric(metrics, "paper_cumulative_cost_gb") or final_metric(metrics, "cumulative_cost_gb"),
+        "final_communication_cost_gb": final_metric(metrics, "effective_cumulative_cost_gb") or final_metric(metrics, "cumulative_cost_gb"),
+        "baseline_per_round_cost_gb": per_round_cost(metrics, mode="paper"),
+        "communication_per_round_cost_gb": per_round_cost(metrics, mode="effective"),
+        "baseline_cost_to_target_gb": cost_to_target(metrics, target_accuracy, mode="paper"),
+        "communication_cost_to_target_gb": cost_to_target(metrics, target_accuracy, mode="effective"),
         "rounds_to_target": round_to_target(metrics, target_accuracy),
         "paper_accuracy_at_common_budget": (
             accuracy_at_budget(metrics, common_budgets["paper"], mode="paper")
             if "paper" in common_budgets
             else None
         ),
-        "effective_accuracy_at_common_budget": (
+        "communication_accuracy_at_common_budget": (
             accuracy_at_budget(metrics, common_budgets["effective"], mode="effective")
             if "effective" in common_budgets
             else None
@@ -217,20 +217,20 @@ def build_strategy_summary(
         "total_model_payload_bytes": int(sum(metrics.get("model_payload_bytes", []))),
         "total_probe_payload_bytes": int(sum(metrics.get("probe_payload_bytes", []))),
     }
-    if summary["final_paper_cost_gb"] is not None and summary["final_effective_cost_gb"] is not None and summary["final_paper_cost_gb"] > 0:
-        raw_delta = float(summary["final_paper_cost_gb"]) - float(summary["final_effective_cost_gb"])
-        pct_delta = (1.0 - (float(summary["final_effective_cost_gb"]) / float(summary["final_paper_cost_gb"]))) * 100.0
+    if summary["final_baseline_cost_gb"] is not None and summary["final_communication_cost_gb"] is not None and summary["final_baseline_cost_gb"] > 0:
+        raw_delta = float(summary["final_baseline_cost_gb"]) - float(summary["final_communication_cost_gb"])
+        pct_delta = (1.0 - (float(summary["final_communication_cost_gb"]) / float(summary["final_baseline_cost_gb"]))) * 100.0
         summary["cost_savings_gb"] = 0.0 if abs(raw_delta) < 1e-12 else raw_delta
         summary["cost_savings_pct"] = 0.0 if abs(pct_delta) < 1e-12 else pct_delta
     else:
         summary["cost_savings_gb"] = None
         summary["cost_savings_pct"] = None
     if compare_accuracy is not None:
-        summary["effective_cost_to_reference_accuracy_gb"] = cost_to_target(metrics, compare_accuracy, mode="effective")
-        summary["paper_cost_to_reference_accuracy_gb"] = cost_to_target(metrics, compare_accuracy, mode="paper")
+        summary["communication_cost_to_reference_accuracy_gb"] = cost_to_target(metrics, compare_accuracy, mode="effective")
+        summary["baseline_cost_to_reference_accuracy_gb"] = cost_to_target(metrics, compare_accuracy, mode="paper")
     else:
-        summary["effective_cost_to_reference_accuracy_gb"] = None
-        summary["paper_cost_to_reference_accuracy_gb"] = None
+        summary["communication_cost_to_reference_accuracy_gb"] = None
+        summary["baseline_cost_to_reference_accuracy_gb"] = None
     return summary
 
 
@@ -311,7 +311,7 @@ def build_comparison_payload(
         "strategy_dirs": dict(strategy_dirs or {}),
         "common_budget_gb": selected_common_budget,
         "paper_common_budget_gb": paper_common_budget,
-        "effective_common_budget_gb": effective_common_budget,
+        "communication_common_budget_gb": effective_common_budget,
         "summary": selected_summary,
         "paper_summary": paper_summary,
         "effective_summary": effective_summary,

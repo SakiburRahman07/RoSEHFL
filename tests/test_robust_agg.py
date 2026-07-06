@@ -2,7 +2,7 @@ import unittest
 
 import numpy as np
 
-from rosehfl.utils.robust_agg import aggregate_with_rule
+from src.utils.robust_agg import aggregate_with_rule
 
 
 class RobustAggregationTests(unittest.TestCase):

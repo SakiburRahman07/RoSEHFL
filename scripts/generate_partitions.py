@@ -17,13 +17,13 @@ import argparse
 import json
 import os
 
-from rosehfl.data.data_loader import (
+from src.data.data_loader import (
     DATASET_INFO,
     create_non_iid_partitions,
     load_data,
 )
-from rosehfl.utils.seed import set_seed
-from rosehfl.utils.shapley import build_probe_set
+from src.utils.seed import set_seed
+from src.utils.shapley import build_probe_set
 
 
 def generate_partition_files(

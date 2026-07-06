@@ -4,7 +4,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, TensorDataset
 
-from rosehfl.utils.shapley import compute_exact_shapley, compute_smc_shapley
+from src.utils.shapley import compute_exact_shapley, compute_smc_shapley
 
 
 class TinyLinear(torch.nn.Module):

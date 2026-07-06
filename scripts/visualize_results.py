@@ -16,7 +16,7 @@ import json
 import os
 import sys
 
-from rosehfl.utils.visualization import visualize_simulation
+from src.utils.visualization import visualize_simulation
 
 try:
     from ._comparison_plots import generate_comparison_package

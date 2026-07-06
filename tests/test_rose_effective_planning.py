@@ -5,7 +5,7 @@ from unittest.mock import patch
 import numpy as np
 from flwr.common import ndarrays_to_parameters, parameters_to_ndarrays
 
-from rosehfl.strategy import RoSEHFLStrategy
+from src.strategy import RoSEHFLStrategy
 
 
 def _strategy(**overrides) -> RoSEHFLStrategy:
@@ -45,8 +45,8 @@ def _candidate(
     source: str,
     edge_nodes,
     planning_score_gb: float,
-    paper_per_round_cost_gb: float,
-    effective_per_round_cost_gb: float,
+    baseline_per_round_cost_gb: float,
+    communication_per_round_cost_gb: float,
     simulated_probe_accuracy: float,
 ):
     normalised_edge_nodes = {
@@ -58,9 +58,9 @@ def _candidate(
         "selected_edges": set(int(edge_id) for edge_id in normalised_edge_nodes),
         "edge_nodes": normalised_edge_nodes,
         "node_edge": _edge_nodes_to_node_edge(normalised_edge_nodes),
-        "objective_value": paper_per_round_cost_gb,
-        "paper_per_round_cost_gb": paper_per_round_cost_gb,
-        "effective_per_round_cost_gb": effective_per_round_cost_gb,
+        "objective_value": baseline_per_round_cost_gb,
+        "baseline_per_round_cost_gb": baseline_per_round_cost_gb,
+        "communication_per_round_cost_gb": communication_per_round_cost_gb,
         "change_cost_gb": 0.0,
         "projected_remaining_rounds": 1,
         "planning_score_gb": planning_score_gb,
@@ -87,23 +87,23 @@ class RoSEQ1SPlanningTests(unittest.TestCase):
             objective_value=float(objective_value),
         )
 
-    def test_selection_prefers_lower_effective_total_cost_over_lower_paper_cost(self):
+    def test_selection_prefers_lower_communication_total_cost_over_lower_baseline_cost(self):
         strategy = _strategy()
         candidates = [
             _candidate(
                 source="current",
                 edge_nodes={0: [0, 1, 2], 1: [3, 4, 5]},
                 planning_score_gb=2.40,
-                paper_per_round_cost_gb=0.20,
-                effective_per_round_cost_gb=0.80,
+                baseline_per_round_cost_gb=0.20,
+                communication_per_round_cost_gb=0.80,
                 simulated_probe_accuracy=0.80,
             ),
             _candidate(
                 source="planner_0",
                 edge_nodes={0: [0, 1, 2], 2: [3, 4, 5]},
                 planning_score_gb=1.80,
-                paper_per_round_cost_gb=0.35,
-                effective_per_round_cost_gb=0.40,
+                baseline_per_round_cost_gb=0.35,
+                communication_per_round_cost_gb=0.40,
                 simulated_probe_accuracy=0.79,
             ),
         ]
@@ -115,8 +115,8 @@ class RoSEQ1SPlanningTests(unittest.TestCase):
 
         self.assertEqual(chosen["source"], "planner_0")
         self.assertGreater(
-            float(annotated[1]["paper_per_round_cost_gb"]),
-            float(annotated[0]["paper_per_round_cost_gb"]),
+            float(annotated[1]["baseline_per_round_cost_gb"]),
+            float(annotated[0]["baseline_per_round_cost_gb"]),
         )
         self.assertLess(
             float(annotated[1]["planning_score_gb"]),
@@ -130,16 +130,16 @@ class RoSEQ1SPlanningTests(unittest.TestCase):
                 source="current",
                 edge_nodes={0: [0, 1, 2], 1: [3, 4, 5]},
                 planning_score_gb=3.00,
-                paper_per_round_cost_gb=0.30,
-                effective_per_round_cost_gb=0.60,
+                baseline_per_round_cost_gb=0.30,
+                communication_per_round_cost_gb=0.60,
                 simulated_probe_accuracy=0.82,
             ),
             _candidate(
                 source="planner_0",
                 edge_nodes={0: [0, 1, 2], 2: [3, 4, 5]},
                 planning_score_gb=1.20,
-                paper_per_round_cost_gb=0.25,
-                effective_per_round_cost_gb=0.45,
+                baseline_per_round_cost_gb=0.25,
+                communication_per_round_cost_gb=0.45,
                 simulated_probe_accuracy=0.77,
             ),
         ]
@@ -166,24 +166,24 @@ class RoSEQ1SPlanningTests(unittest.TestCase):
                 source="current",
                 edge_nodes={0: [0, 1, 2], 1: [3, 4, 5]},
                 planning_score_gb=3.00,
-                paper_per_round_cost_gb=0.30,
-                effective_per_round_cost_gb=0.60,
+                baseline_per_round_cost_gb=0.30,
+                communication_per_round_cost_gb=0.60,
                 simulated_probe_accuracy=0.81,
             ),
             _candidate(
                 source="planner_0",
                 edge_nodes={0: [0, 1, 2], 2: [3, 4, 5]},
                 planning_score_gb=2.50,
-                paper_per_round_cost_gb=0.28,
-                effective_per_round_cost_gb=0.40,
+                baseline_per_round_cost_gb=0.28,
+                communication_per_round_cost_gb=0.40,
                 simulated_probe_accuracy=0.83,
             ),
             _candidate(
                 source="planner_1",
                 edge_nodes={1: [0, 1, 2], 2: [3, 4, 5]},
                 planning_score_gb=1.10,
-                paper_per_round_cost_gb=0.26,
-                effective_per_round_cost_gb=0.35,
+                baseline_per_round_cost_gb=0.26,
+                communication_per_round_cost_gb=0.35,
                 simulated_probe_accuracy=0.821,
             ),
         ]
@@ -210,16 +210,16 @@ class RoSEQ1SPlanningTests(unittest.TestCase):
                 source="current",
                 edge_nodes={0: [0, 1, 2], 1: [3, 4, 5]},
                 planning_score_gb=3.00,
-                paper_per_round_cost_gb=0.30,
-                effective_per_round_cost_gb=0.60,
+                baseline_per_round_cost_gb=0.30,
+                communication_per_round_cost_gb=0.60,
                 simulated_probe_accuracy=0.81,
             ),
             _candidate(
                 source="planner_0",
                 edge_nodes={0: [0, 1, 2], 2: [3, 4, 5]},
                 planning_score_gb=2.50,
-                paper_per_round_cost_gb=0.28,
-                effective_per_round_cost_gb=0.40,
+                baseline_per_round_cost_gb=0.28,
+                communication_per_round_cost_gb=0.40,
                 simulated_probe_accuracy=0.83,
             ),
         ]
@@ -240,16 +240,16 @@ class RoSEQ1SPlanningTests(unittest.TestCase):
                 source="current",
                 edge_nodes={0: [0, 1], 1: [2, 3], 2: [4, 5]},
                 planning_score_gb=3.00,
-                paper_per_round_cost_gb=0.30,
-                effective_per_round_cost_gb=0.60,
+                baseline_per_round_cost_gb=0.30,
+                communication_per_round_cost_gb=0.60,
                 simulated_probe_accuracy=0.80,
             ),
             _candidate(
                 source="planner_0",
                 edge_nodes={0: [0], 1: [1, 2], 2: [3, 4, 5]},
                 planning_score_gb=1.00,
-                paper_per_round_cost_gb=0.20,
-                effective_per_round_cost_gb=0.30,
+                baseline_per_round_cost_gb=0.20,
+                communication_per_round_cost_gb=0.30,
                 simulated_probe_accuracy=0.79,
             ),
         ]
@@ -303,7 +303,7 @@ class RoSEQ1SPlanningTests(unittest.TestCase):
             1: 20.0,
         }
 
-        effective_cost = strategy._effective_probe_payload_cost(
+        effective_cost = strategy._communication_probe_payload_cost(
             probe_payload_bytes={0: 10, 1: 20, 2: 30},
             node_edge_map={0: 0, 1: 0, 2: 1},
         )
@@ -353,31 +353,31 @@ class RoSEQ1SPlanningTests(unittest.TestCase):
         def fake_simulate(*, candidate, **_kwargs):
             if candidate["source"] == "current":
                 return {
-                    "paper_per_round_cost_gb": 1.5,
-                    "effective_per_round_cost_gb": 1.5,
+                    "baseline_per_round_cost_gb": 1.5,
+                    "communication_per_round_cost_gb": 1.5,
                     "simulated_probe_accuracy": 0.81,
                     "model_payload_bytes": 0,
                     "probe_payload_bytes": 0,
                 }
             return {
-                "paper_per_round_cost_gb": 1.0,
-                "effective_per_round_cost_gb": 1.0,
+                "baseline_per_round_cost_gb": 1.0,
+                "communication_per_round_cost_gb": 1.0,
                 "simulated_probe_accuracy": 0.83,
                 "model_payload_bytes": 0,
                 "probe_payload_bytes": 0,
             }
 
         with patch(
-            "rosehfl.strategy.compute_hybrid_phi",
+            "src.strategy.compute_hybrid_phi",
             return_value=(
                 {node_id: 1.0 for node_id in range(6)},
                 {"lambda_dynamic": 0.5},
             ),
         ), patch(
-            "rosehfl.strategy.run_los_rose_candidates",
+            "src.strategy.run_los_rose_candidates",
             return_value=(planner_result, []),
         ), patch(
-            "rosehfl.strategy.evaluate_on_probe",
+            "src.strategy.evaluate_on_probe",
             return_value=0.80,
         ), patch.object(
             strategy,

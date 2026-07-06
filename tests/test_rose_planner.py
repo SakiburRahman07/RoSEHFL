@@ -2,7 +2,7 @@ import unittest
 
 import numpy as np
 
-from rosehfl.algorithms.los_rose import run_los_rose
+from src.algorithms.los_rose import run_los_rose
 
 
 class RoSEPlannerTests(unittest.TestCase):

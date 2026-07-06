@@ -8,7 +8,7 @@ from __future__ import annotations
 import argparse
 import os
 
-from rosehfl.utils.seed import set_seed
+from src.utils.seed import set_seed
 
 try:
     from ._cli_args import add_common_experiment_args, add_single_strategy_arg
@@ -116,7 +116,7 @@ def main() -> None:
     )
 
     try:
-        from rosehfl.utils.visualization import visualize_simulation
+        from src.utils.visualization import visualize_simulation
 
         visualize_simulation(
             metrics=result["metrics"],

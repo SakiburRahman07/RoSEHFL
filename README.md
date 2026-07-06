@@ -1,6 +1,6 @@
 # RoSEHFL on Flower
 
-RoSEHFL is the active research implementation in this repository. The main package is `rosehfl/`. The directory `flower_shapefl_code/` is a separate standalone ShapeFL snapshot and is not the canonical runtime for this root project.
+RoSEHFL is the active research implementation in this repository. The main package is `src/`. The directory `flower_shapefl_code/` is a separate standalone ShapeFL snapshot and is not the canonical runtime for this root project.
 
 ## Main Entry Points
 
@@ -24,14 +24,7 @@ The unified runners support:
 - `cost_first`
 - `data_first`
 - `random`
-- `rose`
-- `roseplusplus`
-- `rose_q1`
-- `rose_q1s`
-- `rose_effective`
-- `rose_median`
-- `rose_trimmed_mean`
-- `rose_krum`
+- `rosehfl`
 - `fedavg`
 - `fedprox`
 - `gtg_shapley`
@@ -47,7 +40,7 @@ uv sync
 
 ```bash
 uv run python -m scripts.run_simulation \
-  --strategy rose_q1s \
+  --strategy rosehfl \
   --model lenet5 \
   --dataset fmnist \
   --topology geant2010 \
@@ -61,7 +54,7 @@ Resume a previous package:
 ```bash
 uv run python -m scripts.run_simulation \
   --resume \
-  --strategy rose_q1s \
+  --strategy rosehfl \
   --output-dir results/<your_run_dir>
 ```
 
@@ -69,7 +62,7 @@ uv run python -m scripts.run_simulation \
 
 ```bash
 uv run python -m scripts.run_comparison \
-  --strategies shapefl rose_q1s fedavg \
+  --strategies shapefl rosehfl fedavg \
   --model lenet5 \
   --dataset fmnist \
   --topology geant2010 \
@@ -81,7 +74,7 @@ Resume a previous comparison package:
 ```bash
 uv run python -m scripts.run_comparison \
   --resume \
-  --strategies shapefl rose_q1s fedavg \
+  --strategies shapefl rosehfl fedavg \
   --output-dir results/<your_comparison_dir>
 ```
 
@@ -117,8 +110,5 @@ Comparison package:
 
 ## Research Utilities
 
-The repository also keeps a few focused research utilities:
-
-- `scripts/run_ablation_grid.py`
-- `scripts/run_byzantine_sweep.py`
-- `scripts/run_fairness_eval.py`
+- `scripts/run_byzantine_sweep.py` — Byzantine robustness experiments
+- `scripts/run_fairness_eval.py` — Fairness evaluation on completed runs

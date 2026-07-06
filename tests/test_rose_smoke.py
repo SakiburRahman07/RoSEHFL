@@ -8,11 +8,11 @@ import torch
 from flwr.common import ndarrays_to_parameters
 from torch.utils.data import DataLoader, Dataset
 
-from rosehfl.client import client_fn_factory
-from rosehfl.data.data_loader import get_partition_label_counts
-from rosehfl.strategy import RoSEHFLStrategy
-from rosehfl.utils.seed import set_seed
-from rosehfl.utils.shapley import build_probe_set
+from src.client import client_fn_factory
+from src.data.data_loader import get_partition_label_counts
+from src.strategy import RoSEHFLStrategy
+from src.utils.seed import set_seed
+from src.utils.shapley import build_probe_set
 
 
 class ToyDataset(Dataset):
@@ -44,7 +44,7 @@ class RoSESmokeTests(unittest.TestCase):
         test_loader = DataLoader(test_dataset, batch_size=4, shuffle=False)
 
         def model_factory():
-            from rosehfl.models.lenet5 import LeNet5
+            from src.models.lenet5 import LeNet5
 
             return LeNet5(num_classes=10, input_channels=1)
 
@@ -211,12 +211,12 @@ class RoSESmokeTests(unittest.TestCase):
 
             with open(os.path.join(tmpdir, "metrics.json"), "r", encoding="utf-8") as handle:
                 metrics = json.load(handle)
-            self.assertTrue(metrics["effective_per_round_cost_gb"])
+            self.assertTrue(metrics["communication_per_round_cost_gb"])
             self.assertTrue(metrics["model_payload_bytes"])
             self.assertGreater(sum(metrics["model_payload_bytes"]), 0)
             self.assertLess(
-                metrics["effective_per_round_cost_gb"][-1],
-                metrics["paper_per_round_cost_gb"][-1],
+                metrics["communication_per_round_cost_gb"][-1],
+                metrics["baseline_per_round_cost_gb"][-1],
             )
 
             with open(os.path.join(tmpdir, "plan.json"), "r", encoding="utf-8") as handle:

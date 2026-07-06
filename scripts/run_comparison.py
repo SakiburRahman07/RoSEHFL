@@ -8,7 +8,7 @@ from __future__ import annotations
 import argparse
 import os
 
-from rosehfl.utils.seed import set_seed
+from src.utils.seed import set_seed
 
 try:
     from ._cli_args import add_common_experiment_args, add_multi_strategy_arg
@@ -54,7 +54,7 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     add_common_experiment_args(parser)
-    add_multi_strategy_arg(parser, default=["shapefl", "rose_q1s"])
+    add_multi_strategy_arg(parser, default=["shapefl", "rosehfl"])
     parser.add_argument("--comparison-mode", type=str, default="effective", choices=["paper", "effective"])
     parser.add_argument("--plot-title", type=str, default=None)
     parser.add_argument("--plot-dpi", type=int, default=180)

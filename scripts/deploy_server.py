@@ -21,8 +21,8 @@ import time
 import grpc as _grpc
 import flwr as fl
 
-from rosehfl.data.data_loader import DATASET_INFO
-from rosehfl.utils.seed import set_seed
+from src.data.data_loader import DATASET_INFO
+from src.utils.seed import set_seed
 
 
 def _patch_server_grpc_keepalive() -> None:
