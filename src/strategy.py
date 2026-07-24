@@ -71,10 +71,12 @@ from .utils.compression import (
     scaled_cost_from_payload,
     zero_residuals_like,
 )
+from .utils.atomic_io import atomic_write_bytes
 from .utils.drift import PageHinkleyBank, PageHinkleyState, weights_l2_distance
 from .utils.json_utils import save_json
 from .utils.model_state import batch_norm_state_keys, head_state_keys, state_key_indices
 from .utils.network_topology import generate_topology
+from .utils.remote_sync import request_sync
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -453,13 +455,16 @@ class ShapeFlStrategy(fl.server.strategy.Strategy):
             return
         save_json(self._serialise_metrics(), os.path.join(self.output_dir, "metrics.json"))
         save_json(self._status_payload(completed), os.path.join(self.output_dir, "status.json"))
-        with open(os.path.join(self.output_dir, "checkpoint.pkl"), "wb") as handle:
-            pickle.dump(self.get_checkpoint_state(), handle)
+        atomic_write_bytes(
+            os.path.join(self.output_dir, "checkpoint.pkl"),
+            pickle.dumps(self.get_checkpoint_state()),
+        )
         try:
             from .utils.visualization import generate_live_dashboard
             generate_live_dashboard(self.metrics_history, self.output_dir)
         except Exception:
             pass
+        request_sync()
 
     # ════════════════════════════════════════════════════════════════════
     #  Strategy interface
@@ -1263,13 +1268,16 @@ class FedAvgFlatStrategy(fl.server.strategy.Strategy):
             return
         save_json(self._serialise_metrics(), os.path.join(self.output_dir, "metrics.json"))
         save_json(self._status_payload(completed), os.path.join(self.output_dir, "status.json"))
-        with open(os.path.join(self.output_dir, "checkpoint.pkl"), "wb") as handle:
-            pickle.dump(self.get_checkpoint_state(), handle)
+        atomic_write_bytes(
+            os.path.join(self.output_dir, "checkpoint.pkl"),
+            pickle.dumps(self.get_checkpoint_state()),
+        )
         try:
             from .utils.visualization import generate_live_dashboard
             generate_live_dashboard(self.metrics_history, self.output_dir)
         except Exception:
             pass
+        request_sync()
 
     def initialize_parameters(self, client_manager):
         if self._checkpoint_loaded:
@@ -2249,13 +2257,16 @@ class RoSEHFLStrategy(ShapeFlStrategy):
         save_json({"events": self.shapley_history}, os.path.join(self.output_dir, "shapley_history.json"))
         save_json(self._serialise_privacy(), os.path.join(self.output_dir, "privacy.json"))
         save_json(self._status_payload(completed), os.path.join(self.output_dir, "status.json"))
-        with open(os.path.join(self.output_dir, "checkpoint.pkl"), "wb") as handle:
-            pickle.dump(self.get_checkpoint_state(), handle)
+        atomic_write_bytes(
+            os.path.join(self.output_dir, "checkpoint.pkl"),
+            pickle.dumps(self.get_checkpoint_state()),
+        )
         try:
             from .utils.visualization import generate_live_dashboard
             generate_live_dashboard(self.metrics_history, self.output_dir)
         except Exception:
             pass
+        request_sync()
 
     def _is_complete(self) -> bool:
         if self.total_local_epochs is not None and self.completed_local_epochs >= self.total_local_epochs:

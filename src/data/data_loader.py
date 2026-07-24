@@ -71,7 +71,12 @@ class FMNISTDataset(Dataset):
 
 
 def _default_dataset_dir() -> str:
-    """Return the default dataset directory (``<project>/dataset``)."""
+    """Return the dataset cache directory.
+    If the environment variable ROSEHFL_DATA_DIR is set, use that. Otherwise, default to a 'dataset' directory in the project root.
+    """
+    override = os.environ.get("ROSEHFL_DATA_DIR")
+    if override:
+        return override
     return os.path.join(
         os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
         "dataset",

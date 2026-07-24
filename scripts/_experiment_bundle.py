@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from src.data.data_loader import DATASET_INFO
+from src.utils.atomic_io import atomic_write_bytes
 from src.utils.json_utils import NumpyEncoder
 
 from ._rose_common import (
@@ -72,15 +73,19 @@ def load_json(path: str | Path, default: Any = None) -> Any:
     path = Path(path)
     if not path.is_file():
         return default
-    with path.open("r", encoding="utf-8") as handle:
-        return json.load(handle)
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except json.JSONDecodeError:
+        # A process kill mid-write (pre-atomic-write files, or a partially
+        # synced remote copy) can leave a truncated file behind. Treat it
+        # like a missing file rather than crashing the whole run.
+        return default
 
 
 def write_json(path: str | Path, payload: Any) -> None:
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as handle:
-        json.dump(payload, handle, indent=2, cls=NumpyEncoder)
+    data = json.dumps(payload, indent=2, cls=NumpyEncoder).encode("utf-8")
+    atomic_write_bytes(str(path), data)
 
 
 def build_metadata(run_type: str, args, strategy_names: list[str]) -> dict[str, Any]:

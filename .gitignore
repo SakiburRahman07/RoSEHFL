@@ -4,10 +4,10 @@
 __pycache__/
 dataset/
 logs/
+*.log
 partitions/
 checkpoints/
 metrics/
-*.md
 !README.md
 !LICENSE.md
 !CLAUDE.md
@@ -17,3 +17,5 @@ results/
 *.zip
 reports/
 .env
+scripts/shell
+demo/

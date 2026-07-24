@@ -225,8 +225,15 @@ def load_checkpoint_if_available(output_dir: str) -> Optional[Dict[str, object]]
 
     # SECURITY: Only load checkpoint files you trust. pickle.load can execute
     # arbitrary code. Do not load checkpoints from untrusted sources.
-    with open(checkpoint_path, "rb") as handle:
-        return pickle.load(handle)
+    try:
+        with open(checkpoint_path, "rb") as handle:
+            return pickle.load(handle)
+    except (pickle.UnpicklingError, EOFError, ValueError, OSError) as exc:
+        # A process kill mid-write can leave a truncated/corrupt checkpoint.
+        # Degrade to "no checkpoint" (restart this strategy) instead of
+        # crashing resume outright.
+        print(f"[Warning] Checkpoint at {checkpoint_path} is unreadable ({exc}); ignoring it.")
+        return None
 
 
 def write_summary_json(path: str, payload: Dict[str, object]) -> None:
