@@ -211,12 +211,161 @@ def _validate_checkpoint(
         )
 
 
+def _new_metrics_history() -> Dict[str, list]:
+    """Fresh per-run metrics accumulator, shared shape across every strategy."""
+    return {
+        "cloud_round": [],
+        "accuracy": [],
+        "loss": [],
+        "per_round_cost_gb": [],
+        "cumulative_cost_gb": [],
+        "baseline_per_round_cost_gb": [],
+        "baseline_cumulative_cost_gb": [],
+        "communication_per_round_cost_gb": [],
+        "communication_cumulative_cost_gb": [],
+        "model_payload_bytes": [],
+        "probe_payload_bytes": [],
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  _FlowerStrategyBase — plumbing shared by every strategy below
+# ═══════════════════════════════════════════════════════════════════════════
+#  CID resolution, communication-delay simulation, and checkpoint I/O were
+#  previously copy-pasted (verbatim, in some cases) across ShapeFlStrategy,
+#  FedAvgFlatStrategy, and RoSEHFLStrategy. This base class is the single
+#  source of truth for that plumbing; each subclass keeps only the state
+#  layout and round logic that is actually its own.
+
+class _FlowerStrategyBase(fl.server.strategy.Strategy):
+    def initialize_parameters(self, client_manager: ClientManager) -> Optional[Parameters]:
+        if self._checkpoint_loaded:
+            self._fill_resume_gap()
+        return self.global_parameters
+
+    def _resolve_node_id(self, cid: str) -> int:
+        """Map Flower's CID (integer or UUID) to partition index 0..N-1."""
+        return self._cid_mapper.resolve(cid)
+
+    def _build_cid_map(self, clients) -> None:
+        """Build CID→partition mapping. Tries client properties first, then sort-order."""
+        self._cid_mapper.build_sort_order(clients)
+        for client in clients:
+            cid = client.cid
+            if str(cid) in self._cid_mapper.cid_to_node_id:
+                continue  # already registered via metrics
+            try:
+                props = client.get_properties(GetPropertiesIns(), timeout=3)
+                self._cid_mapper.register_from_metrics(
+                    str(cid), dict(props.properties) if props.properties else {}
+                )
+            except Exception:
+                pass  # client may not support get_properties, fall through to sort-order
+
+    def set_partitions(self, partitions: Dict[int, list], seed: Optional[int] = None) -> None:
+        """Store partition hash for checkpoint integrity verification."""
+        self._partition_hash = _compute_partition_hash(partitions)
+        self._seed = seed
+
+    def _inject_communication_delay(self, node_id: int, edge_id: int | None = None) -> None:
+        """Sleep proportional to topology cost when cost_mode == 'delayed'."""
+        if self.cost_mode != "delayed":
+            return
+        if edge_id is not None and (node_id, edge_id) in self.c_ne:
+            cost_gb = self.c_ne[(node_id, edge_id)]
+        elif node_id in self.c_ec:
+            cost_gb = self.c_ec[node_id]
+        else:
+            return
+        delay = cost_gb * 1024.0 / self.lan_bandwidth_mbps * self.delay_scale
+        if delay > 0:
+            time.sleep(delay)
+
+    def num_fit_clients(self, num_available_clients: int) -> Tuple[int, int]:
+        return self.num_nodes, self.num_nodes
+
+    def num_evaluate_clients(self, num_available_clients: int) -> Tuple[int, int]:
+        return self.num_nodes, self.num_nodes
+
+    # ── checkpoint plumbing ─────────────────────────────────────────────
+
+    def _migrate_legacy_metrics_defaults(self) -> None:
+        """Backfill metrics keys absent from checkpoints saved before they existed."""
+        self.metrics_history.setdefault(
+            "baseline_per_round_cost_gb", list(self.metrics_history["per_round_cost_gb"])
+        )
+        self.metrics_history.setdefault(
+            "baseline_cumulative_cost_gb", list(self.metrics_history["cumulative_cost_gb"])
+        )
+        self.metrics_history.setdefault(
+            "communication_per_round_cost_gb", list(self.metrics_history["per_round_cost_gb"])
+        )
+        self.metrics_history.setdefault(
+            "communication_cumulative_cost_gb", list(self.metrics_history["cumulative_cost_gb"])
+        )
+        self.metrics_history.setdefault("model_payload_bytes", [])
+        self.metrics_history.setdefault("probe_payload_bytes", [])
+
+    def _checkpoint_tail(self) -> Dict[str, object]:
+        """Fields appended to the end of every strategy's checkpoint payload."""
+        return {
+            "numpy_rng_state": np.random.get_state(),
+            "partition_hash": self._partition_hash,
+            "hyperparameters": self._get_hyperparameters(),
+        }
+
+    def _finalise_checkpoint_load(self, state: Dict[str, object], strategy_name: str) -> None:
+        """Common tail of load_checkpoint_state: RNG restore, validation, partition check."""
+        if "numpy_rng_state" in state:
+            np.random.set_state(state["numpy_rng_state"])
+        _validate_checkpoint(
+            state=state,
+            partitions=None,
+            hyperparameters=self._get_hyperparameters(),
+            strategy_name=strategy_name,
+        )
+        saved_hash = state.get("partition_hash")
+        if saved_hash is not None and self._partition_hash is not None:
+            if saved_hash != self._partition_hash:
+                raise ValueError(
+                    f"Partition hash mismatch: checkpoint {saved_hash[:16]}... "
+                    f"vs current {self._partition_hash[:16]}.... "
+                    "Resume with the same --seed, --dataset, --num-nodes."
+                )
+        self._checkpoint_loaded = True
+
+    def _persist_extra_artifacts(self) -> None:
+        """Hook: strategy-specific artifact files written between metrics and status."""
+        return None
+
+    def _persist_artifacts(self, completed: bool = False) -> None:
+        if not self.output_dir:
+            return
+        save_json(self._serialise_metrics(), os.path.join(self.output_dir, "metrics.json"))
+        self._persist_extra_artifacts()
+        save_json(self._status_payload(completed), os.path.join(self.output_dir, "status.json"))
+        atomic_write_bytes(
+            os.path.join(self.output_dir, "checkpoint.pkl"),
+            pickle.dumps(self.get_checkpoint_state()),
+        )
+        try:
+            from .utils.visualization import generate_live_dashboard
+            generate_live_dashboard(self.metrics_history, self.output_dir)
+        except Exception:
+            pass
+        request_sync()
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 #  ShapeFlStrategy — baseline hierarchical implementation
 # ═══════════════════════════════════════════════════════════════════════════
 
-class ShapeFlStrategy(fl.server.strategy.Strategy):
+class ShapeFlStrategy(_FlowerStrategyBase):
     """Baseline ShapeFL-style three-tier HFL strategy for Flower."""
+
+    _PRETRAIN_PHASE_NAME = "pretrain"
+    _ROUND_LOG_LABEL = "Cloud Round"
+    _GUARD_ZERO_TOTAL_EXAMPLES = False
 
     def __init__(
         self,
@@ -301,19 +450,7 @@ class ShapeFlStrategy(fl.server.strategy.Strategy):
         self._reported_model_payload_bytes = 0
         self._reported_probe_payload_bytes = 0
 
-        self.metrics_history = {
-            "cloud_round": [],
-            "accuracy": [],
-            "loss": [],
-            "per_round_cost_gb": [],
-            "cumulative_cost_gb": [],
-            "baseline_per_round_cost_gb": [],
-            "baseline_cumulative_cost_gb": [],
-            "communication_per_round_cost_gb": [],
-            "communication_cumulative_cost_gb": [],
-            "model_payload_bytes": [],
-            "probe_payload_bytes": [],
-        }
+        self.metrics_history = _new_metrics_history()
 
     @property
     def total_flower_rounds(self) -> int:
@@ -348,7 +485,7 @@ class ShapeFlStrategy(fl.server.strategy.Strategy):
         return {key: list(values) for key, values in self.metrics_history.items()}
 
     def get_checkpoint_state(self) -> Dict[str, object]:
-        return {
+        state = {
             "phase": self.phase,
             "cloud_round": int(self.cloud_round),
             "edge_epoch": int(self.edge_epoch),
@@ -379,10 +516,9 @@ class ShapeFlStrategy(fl.server.strategy.Strategy):
             "current_cycle_model_payload_bytes": int(self.current_cycle_model_payload_bytes),
             "current_cycle_probe_payload_bytes": int(self.current_cycle_probe_payload_bytes),
             "current_cycle_communication_cost_gb": float(self.current_cycle_communication_cost_gb),
-            "numpy_rng_state": np.random.get_state(),
-            "partition_hash": self._partition_hash,
-            "hyperparameters": self._get_hyperparameters(),
         }
+        state.update(self._checkpoint_tail())
+        return state
 
     def load_checkpoint_state(self, state: Dict[str, object]) -> None:
         self.phase = str(state["phase"])
@@ -415,12 +551,7 @@ class ShapeFlStrategy(fl.server.strategy.Strategy):
         self.cumulative_cost_gb = float(state["cumulative_cost_gb"])
         self.communication_cumulative_cost_gb = float(state.get("communication_cumulative_cost_gb", self.cumulative_cost_gb))
         self.metrics_history = state["metrics_history"]
-        self.metrics_history.setdefault("baseline_per_round_cost_gb", list(self.metrics_history["per_round_cost_gb"]))
-        self.metrics_history.setdefault("baseline_cumulative_cost_gb", list(self.metrics_history["cumulative_cost_gb"]))
-        self.metrics_history.setdefault("communication_per_round_cost_gb", list(self.metrics_history["per_round_cost_gb"]))
-        self.metrics_history.setdefault("communication_cumulative_cost_gb", list(self.metrics_history["cumulative_cost_gb"]))
-        self.metrics_history.setdefault("model_payload_bytes", [])
-        self.metrics_history.setdefault("probe_payload_bytes", [])
+        self._migrate_legacy_metrics_defaults()
         self._cid_mapper.from_checkpoint(
             {str(cid): int(node_id) for cid, node_id in state.get("cid_to_partition", {}).items()}
         )
@@ -432,48 +563,11 @@ class ShapeFlStrategy(fl.server.strategy.Strategy):
         self.current_cycle_model_payload_bytes = int(state.get("current_cycle_model_payload_bytes", 0))
         self.current_cycle_probe_payload_bytes = int(state.get("current_cycle_probe_payload_bytes", 0))
         self.current_cycle_communication_cost_gb = float(state.get("current_cycle_communication_cost_gb", 0.0))
-        if "numpy_rng_state" in state:
-            np.random.set_state(state["numpy_rng_state"])
-        _validate_checkpoint(
-            state=state,
-            partitions=None,
-            hyperparameters=self._get_hyperparameters(),
-            strategy_name="ShapeFlStrategy",
-        )
-        saved_hash = state.get("partition_hash")
-        if saved_hash is not None and self._partition_hash is not None:
-            if saved_hash != self._partition_hash:
-                raise ValueError(
-                    f"Partition hash mismatch: checkpoint {saved_hash[:16]}... "
-                    f"vs current {self._partition_hash[:16]}.... "
-                    "Resume with the same --seed, --dataset, --num-nodes."
-                )
-        self._checkpoint_loaded = True
-
-    def _persist_artifacts(self, completed: bool = False) -> None:
-        if not self.output_dir:
-            return
-        save_json(self._serialise_metrics(), os.path.join(self.output_dir, "metrics.json"))
-        save_json(self._status_payload(completed), os.path.join(self.output_dir, "status.json"))
-        atomic_write_bytes(
-            os.path.join(self.output_dir, "checkpoint.pkl"),
-            pickle.dumps(self.get_checkpoint_state()),
-        )
-        try:
-            from .utils.visualization import generate_live_dashboard
-            generate_live_dashboard(self.metrics_history, self.output_dir)
-        except Exception:
-            pass
-        request_sync()
+        self._finalise_checkpoint_load(state, "ShapeFlStrategy")
 
     # ════════════════════════════════════════════════════════════════════
     #  Strategy interface
     # ════════════════════════════════════════════════════════════════════
-
-    def initialize_parameters(self, client_manager: ClientManager) -> Optional[Parameters]:
-        if self._checkpoint_loaded:
-            self._fill_resume_gap()
-        return self.global_parameters
 
     def _fill_resume_gap(self) -> None:
         """Fill a missing metrics entry when resuming after a crash during evaluate.
@@ -504,30 +598,6 @@ class ShapeFlStrategy(fl.server.strategy.Strategy):
             f"CommCost: {self.communication_cumulative_cost_gb:.4f} GB"
         )
 
-    def _resolve_node_id(self, cid: str) -> int:
-        """Map Flower's CID (integer or UUID) to partition index 0..N-1."""
-        return self._cid_mapper.resolve(cid)
-
-    def _build_cid_map(self, clients):
-        """Build CID→partition mapping. Tries client properties first, then sort-order."""
-        self._cid_mapper.build_sort_order(clients)
-        for client in clients:
-            cid = client.cid
-            if str(cid) in self._cid_mapper.cid_to_node_id:
-                continue  # already registered via metrics
-            try:
-                props = client.get_properties(GetPropertiesIns(), timeout=3)
-                self._cid_mapper.register_from_metrics(
-                    str(cid), dict(props.properties) if props.properties else {}
-                )
-            except Exception:
-                pass  # client may not support get_properties, fall through to sort-order
-
-    def set_partitions(self, partitions: Dict[int, list], seed: Optional[int] = None) -> None:
-        """Store partition hash for checkpoint integrity verification."""
-        self._partition_hash = _compute_partition_hash(partitions)
-        self._seed = seed
-
     def _get_hyperparameters(self) -> Dict[str, object]:
         """Collect hyperparameters for checkpoint storage."""
         return {
@@ -548,20 +618,6 @@ class ShapeFlStrategy(fl.server.strategy.Strategy):
             "total_local_epochs": self.total_local_epochs,
             "seed": self._seed,
         }
-
-    def _inject_communication_delay(self, node_id: int, edge_id: int | None = None) -> None:
-        """Sleep proportional to topology cost when cost_mode == 'delayed'."""
-        if self.cost_mode != "delayed":
-            return
-        if edge_id is not None and (node_id, edge_id) in self.c_ne:
-            cost_gb = self.c_ne[(node_id, edge_id)]
-        elif node_id in self.c_ec:
-            cost_gb = self.c_ec[node_id]
-        else:
-            return
-        delay = cost_gb * 1024.0 / self.lan_bandwidth_mbps * self.delay_scale
-        if delay > 0:
-            time.sleep(delay)
 
     def configure_fit(
         self, server_round: int, parameters: Parameters, client_manager: ClientManager,
@@ -608,6 +664,23 @@ class ShapeFlStrategy(fl.server.strategy.Strategy):
         self._persist_artifacts(completed=self._is_complete())
         return aggregated
 
+    def _skip_centralized_round(self) -> bool:
+        """True while still pretraining/warming up, mid-cycle, or before round 1.
+
+        Shared by configure_evaluate/evaluate/aggregate_evaluate here and in
+        RoSEHFLStrategy (which inherits these three methods unchanged and
+        only overrides _PRETRAIN_PHASE_NAME to "warmup").
+        """
+        return self.phase == self._PRETRAIN_PHASE_NAME or self.edge_epoch != 0 or self.cloud_round == 0
+
+    def _log_cloud_round(self, *, accuracy: float, loss: float) -> None:
+        print(
+            f"  {self._ROUND_LOG_LABEL} {self.cloud_round}/{self.kappa} | "
+            f"Acc: {accuracy:.4f} | Loss: {loss:.4f} | "
+            f"BaseCost: {self.cumulative_cost_gb:.4f} GB | "
+            f"CommCost: {self.communication_cumulative_cost_gb:.4f} GB"
+        )
+
     def configure_evaluate(
         self, server_round: int, parameters: Parameters, client_manager: ClientManager,
     ) -> List[Tuple[ClientProxy, EvaluateIns]]:
@@ -616,11 +689,7 @@ class ShapeFlStrategy(fl.server.strategy.Strategy):
         # Skip distributed eval when using centralized evaluate_fn
         if self.evaluate_fn is not None:
             return []
-        if self.phase == "pretrain":
-            return []
-        if self.edge_epoch != 0:
-            return []
-        if self.cloud_round == 0:
+        if self._skip_centralized_round():
             return []
         clients = client_manager.sample(
             num_clients=self.num_nodes, min_num_clients=self.min_fit_clients,
@@ -636,6 +705,8 @@ class ShapeFlStrategy(fl.server.strategy.Strategy):
         for client_proxy, eval_res in results:
             self._cid_mapper.register_from_metrics(client_proxy.cid, eval_res.metrics)
         total_examples = sum(r.num_examples for _, r in results)
+        if self._GUARD_ZERO_TOTAL_EXAMPLES and total_examples == 0:
+            return None, {}
         weighted_loss = sum(r.loss * r.num_examples for _, r in results) / total_examples
         weighted_acc = (
             sum(r.metrics.get("accuracy", 0.0) * r.num_examples for _, r in results)
@@ -646,19 +717,8 @@ class ShapeFlStrategy(fl.server.strategy.Strategy):
             loss=weighted_loss,
         )
         self._persist_artifacts(completed=self._is_complete())
-        print(
-            f"  Cloud Round {self.cloud_round}/{self.kappa} | "
-            f"Acc: {weighted_acc:.4f} | Loss: {weighted_loss:.4f} | "
-            f"BaseCost: {self.cumulative_cost_gb:.4f} GB | "
-            f"CommCost: {self.communication_cumulative_cost_gb:.4f} GB"
-        )
+        self._log_cloud_round(accuracy=weighted_acc, loss=weighted_loss)
         return weighted_loss, {"accuracy": weighted_acc}
-
-    def num_fit_clients(self, num_available_clients: int) -> Tuple[int, int]:
-        return self.num_nodes, self.num_nodes
-
-    def num_evaluate_clients(self, num_available_clients: int) -> Tuple[int, int]:
-        return self.num_nodes, self.num_nodes
 
     def evaluate(
         self, server_round: int, parameters: Parameters,
@@ -673,7 +733,7 @@ class ShapeFlStrategy(fl.server.strategy.Strategy):
             return None
         if server_round == 0 and self._checkpoint_loaded:
             return None
-        if self.phase == "pretrain" or self.edge_epoch != 0 or self.cloud_round == 0:
+        if self._skip_centralized_round():
             return None
         params = parameters_to_ndarrays(parameters)
         loss, metrics = self.evaluate_fn(server_round, params, {})
@@ -683,12 +743,7 @@ class ShapeFlStrategy(fl.server.strategy.Strategy):
             loss=loss,
         )
         self._persist_artifacts(completed=self._is_complete())
-        print(
-            f"  Cloud Round {self.cloud_round}/{self.kappa} | "
-            f"Acc: {accuracy:.4f} | Loss: {loss:.4f} | "
-            f"BaseCost: {self.cumulative_cost_gb:.4f} GB | "
-            f"CommCost: {self.communication_cumulative_cost_gb:.4f} GB"
-        )
+        self._log_cloud_round(accuracy=accuracy, loss=loss)
         return loss, metrics
 
     # ════════════════════════════════════════════════════════════════════
@@ -1087,7 +1142,7 @@ class ShapeFlStrategy(fl.server.strategy.Strategy):
 #  FedAvgFlatStrategy — no-hierarchy baseline
 # ═══════════════════════════════════════════════════════════════════════════
 
-class FedAvgFlatStrategy(fl.server.strategy.Strategy):
+class FedAvgFlatStrategy(_FlowerStrategyBase):
     """
     Flat FedAvg baseline — all nodes communicate directly with the cloud.
     Each Flower round = one FedAvg cloud round with (κ_c × κ_e) local epochs.
@@ -1136,19 +1191,7 @@ class FedAvgFlatStrategy(fl.server.strategy.Strategy):
 
         self.per_round_cost_gb = 0.0
         self.cumulative_cost_gb = 0.0
-        self.metrics_history = {
-            "cloud_round": [],
-            "accuracy": [],
-            "loss": [],
-            "per_round_cost_gb": [],
-            "cumulative_cost_gb": [],
-            "baseline_per_round_cost_gb": [],
-            "baseline_cumulative_cost_gb": [],
-            "communication_per_round_cost_gb": [],
-            "communication_cumulative_cost_gb": [],
-            "model_payload_bytes": [],
-            "probe_payload_bytes": [],
-        }
+        self.metrics_history = _new_metrics_history()
 
     @property
     def total_flower_rounds(self) -> int:
@@ -1219,11 +1262,9 @@ class FedAvgFlatStrategy(fl.server.strategy.Strategy):
             "metrics_history": self.metrics_history,
             "model_payload_bytes_per_round": int(self.model_payload_bytes_per_round),
             "cid_to_partition": self._cid_mapper.to_checkpoint(),
-            "numpy_rng_state": np.random.get_state(),
-            "partition_hash": self._partition_hash,
-            "hyperparameters": self._get_hyperparameters(),
         }
         state.update(self._extra_checkpoint_state())
+        state.update(self._checkpoint_tail())
         return state
 
     def load_checkpoint_state(self, state: Dict[str, object]) -> None:
@@ -1234,55 +1275,13 @@ class FedAvgFlatStrategy(fl.server.strategy.Strategy):
         self.per_round_cost_gb = float(state["per_round_cost_gb"])
         self.cumulative_cost_gb = float(state["cumulative_cost_gb"])
         self.metrics_history = state["metrics_history"]
-        self.metrics_history.setdefault("baseline_per_round_cost_gb", list(self.metrics_history["per_round_cost_gb"]))
-        self.metrics_history.setdefault("baseline_cumulative_cost_gb", list(self.metrics_history["cumulative_cost_gb"]))
-        self.metrics_history.setdefault("communication_per_round_cost_gb", list(self.metrics_history["per_round_cost_gb"]))
-        self.metrics_history.setdefault("communication_cumulative_cost_gb", list(self.metrics_history["cumulative_cost_gb"]))
-        self.metrics_history.setdefault("model_payload_bytes", [])
-        self.metrics_history.setdefault("probe_payload_bytes", [])
+        self._migrate_legacy_metrics_defaults()
         self.model_payload_bytes_per_round = int(state.get("model_payload_bytes_per_round", 0))
-        if "numpy_rng_state" in state:
-            np.random.set_state(state["numpy_rng_state"])
         self._cid_mapper.from_checkpoint(
             {str(cid): int(node_id) for cid, node_id in state.get("cid_to_partition", {}).items()}
         )
         self._load_extra_checkpoint_state(state)
-        _validate_checkpoint(
-            state=state,
-            partitions=None,
-            hyperparameters=self._get_hyperparameters(),
-            strategy_name="FedAvgFlatStrategy",
-        )
-        saved_hash = state.get("partition_hash")
-        if saved_hash is not None and self._partition_hash is not None:
-            if saved_hash != self._partition_hash:
-                raise ValueError(
-                    f"Partition hash mismatch: checkpoint {saved_hash[:16]}... "
-                    f"vs current {self._partition_hash[:16]}.... "
-                    "Resume with the same --seed, --dataset, --num-nodes."
-                )
-        self._checkpoint_loaded = True
-
-    def _persist_artifacts(self, completed: bool = False) -> None:
-        if not self.output_dir:
-            return
-        save_json(self._serialise_metrics(), os.path.join(self.output_dir, "metrics.json"))
-        save_json(self._status_payload(completed), os.path.join(self.output_dir, "status.json"))
-        atomic_write_bytes(
-            os.path.join(self.output_dir, "checkpoint.pkl"),
-            pickle.dumps(self.get_checkpoint_state()),
-        )
-        try:
-            from .utils.visualization import generate_live_dashboard
-            generate_live_dashboard(self.metrics_history, self.output_dir)
-        except Exception:
-            pass
-        request_sync()
-
-    def initialize_parameters(self, client_manager):
-        if self._checkpoint_loaded:
-            self._fill_resume_gap()
-        return self.global_parameters
+        self._finalise_checkpoint_load(state, "FedAvgFlatStrategy")
 
     def _fill_resume_gap(self) -> None:
         """Fill a missing metrics entry when resuming after a crash during evaluate.
@@ -1307,28 +1306,6 @@ class FedAvgFlatStrategy(fl.server.strategy.Strategy):
             f"CumCost: {self.cumulative_cost_gb:.4f} GB"
         )
 
-    def _resolve_node_id(self, cid: str) -> int:
-        return self._cid_mapper.resolve(cid)
-
-    def _build_cid_map(self, clients):
-        """Build CID→partition mapping. Tries client properties first, then sort-order."""
-        self._cid_mapper.build_sort_order(clients)
-        for client in clients:
-            cid = client.cid
-            if str(cid) in self._cid_mapper.cid_to_node_id:
-                continue
-            try:
-                props = client.get_properties(GetPropertiesIns(), timeout=3)
-                self._cid_mapper.register_from_metrics(
-                    str(cid), dict(props.properties) if props.properties else {}
-                )
-            except Exception:
-                pass
-
-    def set_partitions(self, partitions: Dict[int, list], seed: Optional[int] = None) -> None:
-        self._partition_hash = _compute_partition_hash(partitions)
-        self._seed = seed
-
     def _get_hyperparameters(self) -> Dict[str, object]:
         return {
             "num_nodes": self.num_nodes,
@@ -1340,18 +1317,6 @@ class FedAvgFlatStrategy(fl.server.strategy.Strategy):
             "total_local_epochs": self.total_local_epochs,
             "seed": self._seed,
         }
-
-    def _inject_communication_delay(self, node_id: int, edge_id: int | None = None) -> None:
-        """Sleep proportional to topology cost when cost_mode == 'delayed'."""
-        if self.cost_mode != "delayed":
-            return
-        if node_id in self.c_ec:
-            cost_gb = self.c_ec[node_id]
-        else:
-            return
-        delay = cost_gb * 1024.0 / self.lan_bandwidth_mbps * self.delay_scale
-        if delay > 0:
-            time.sleep(delay)
 
     def configure_fit(self, server_round, parameters, client_manager):
         clients = client_manager.sample(
@@ -1438,12 +1403,6 @@ class FedAvgFlatStrategy(fl.server.strategy.Strategy):
         )
         return weighted_loss, {"accuracy": weighted_acc}
 
-    def num_fit_clients(self, num_available_clients):
-        return self.num_nodes, self.num_nodes
-
-    def num_evaluate_clients(self, num_available_clients):
-        return self.num_nodes, self.num_nodes
-
 
 class FedProxFlatStrategy(FedAvgFlatStrategy):
     """Flat FedProx baseline.
@@ -1483,6 +1442,10 @@ class RoSEHFLStrategy(ShapeFlStrategy):
     RoSE-HFL strategy with warm-start planning, drift-triggered replanning,
     trust-aware edge aggregation, and checkpointable run state.
     """
+
+    _PRETRAIN_PHASE_NAME = "warmup"
+    _ROUND_LOG_LABEL = "RoSE Cloud Round"
+    _GUARD_ZERO_TOTAL_EXAMPLES = True
 
     def __init__(
         self,
@@ -1657,7 +1620,6 @@ class RoSEHFLStrategy(ShapeFlStrategy):
         self.hard_edge_min_members = int(max(hard_edge_min_members, 0))
         self._planning_candidate_pool_size = 6
 
-        self.completed_flower_rounds = 0
         self.replan_count = 0
         self.replan_rounds: List[int] = []
         self.plan_history: List[Dict[str, object]] = []
@@ -1681,14 +1643,6 @@ class RoSEHFLStrategy(ShapeFlStrategy):
         self.model_size_bytes = dense_payload_num_bytes(self._current_cycle_reference_weights)
         self.client_compression_residuals: Dict[int, List[np.ndarray]] = {}
         self.edge_compression_residuals: Dict[int, List[np.ndarray]] = {}
-        self.current_cycle_model_payload_bytes = 0
-        self.current_cycle_probe_payload_bytes = 0
-        self.current_cycle_communication_cost_gb = 0.0
-        self.communication_cumulative_cost_gb = 0.0
-        self._reported_baseline_per_round_cost_gb = 0.0
-        self._reported_communication_per_round_cost_gb = 0.0
-        self._reported_model_payload_bytes = 0
-        self._reported_probe_payload_bytes = 0
         self.probe_targets = (
             extract_targets(self.probe_loader.dataset)
             if self.probe_loader is not None
@@ -1720,14 +1674,6 @@ class RoSEHFLStrategy(ShapeFlStrategy):
             head_state_keys(metadata_model),
         )
         self.dense_compression_indices = set(self.bn_parameter_indices) | set(self.head_parameter_indices)
-        self.metrics_history.update({
-            "baseline_per_round_cost_gb": [],
-            "baseline_cumulative_cost_gb": [],
-            "communication_per_round_cost_gb": [],
-            "communication_cumulative_cost_gb": [],
-            "model_payload_bytes": [],
-            "probe_payload_bytes": [],
-        })
 
         if self.output_dir:
             os.makedirs(self.output_dir, exist_ok=True)
@@ -1974,7 +1920,7 @@ class RoSEHFLStrategy(ShapeFlStrategy):
         return base
 
     def get_checkpoint_state(self) -> Dict[str, object]:
-        return {
+        state = {
             "phase": self.phase,
             "cloud_round": self.cloud_round,
             "edge_epoch": self.edge_epoch,
@@ -2049,10 +1995,9 @@ class RoSEHFLStrategy(ShapeFlStrategy):
                 int(node_id): int(value)
                 for node_id, value in self._latest_probe_payload_bytes.items()
             },
-            "numpy_rng_state": np.random.get_state(),
-            "partition_hash": self._partition_hash,
-            "hyperparameters": self._get_hyperparameters(),
         }
+        state.update(self._checkpoint_tail())
+        return state
 
     def load_checkpoint_state(self, state: Dict[str, object]) -> None:
         self.phase = str(state["phase"])
@@ -2083,21 +2028,7 @@ class RoSEHFLStrategy(ShapeFlStrategy):
         self.per_round_cost_gb = float(state["per_round_cost_gb"])
         self.cumulative_cost_gb = float(state["cumulative_cost_gb"])
         self.metrics_history = state["metrics_history"]
-        self.metrics_history.setdefault("baseline_per_round_cost_gb", list(self.metrics_history["per_round_cost_gb"]))
-        self.metrics_history.setdefault(
-            "baseline_cumulative_cost_gb",
-            list(self.metrics_history["cumulative_cost_gb"]),
-        )
-        self.metrics_history.setdefault(
-            "communication_per_round_cost_gb",
-            list(self.metrics_history["per_round_cost_gb"]),
-        )
-        self.metrics_history.setdefault(
-            "communication_cumulative_cost_gb",
-            list(self.metrics_history["cumulative_cost_gb"]),
-        )
-        self.metrics_history.setdefault("model_payload_bytes", [])
-        self.metrics_history.setdefault("probe_payload_bytes", [])
+        self._migrate_legacy_metrics_defaults()
         self.current_phi_raw = {int(node_id): float(value) for node_id, value in state["current_phi_raw"].items()}
         self.current_phi = {int(node_id): float(value) for node_id, value in state["current_phi"].items()}
         self.current_gamma = float(state["current_gamma"])
@@ -2182,42 +2113,12 @@ class RoSEHFLStrategy(ShapeFlStrategy):
             int(node_id): int(value)
             for node_id, value in state.get("latest_probe_payload_bytes", {}).items()
         }
-        if "numpy_rng_state" in state:
-            np.random.set_state(state["numpy_rng_state"])
-        _validate_checkpoint(
-            state=state,
-            partitions=None,
-            hyperparameters=self._get_hyperparameters(),
-            strategy_name="RoSEHFLStrategy",
-        )
-        saved_hash = state.get("partition_hash")
-        if saved_hash is not None and self._partition_hash is not None:
-            if saved_hash != self._partition_hash:
-                raise ValueError(
-                    f"Partition hash mismatch: checkpoint {saved_hash[:16]}... "
-                    f"vs current {self._partition_hash[:16]}.... "
-                    "Resume with the same --seed, --dataset, --num-nodes."
-                )
-        self._checkpoint_loaded = True
+        self._finalise_checkpoint_load(state, "RoSEHFLStrategy")
 
-    def _persist_artifacts(self, completed: bool = False) -> None:
-        if not self.output_dir:
-            return
-        save_json(self._serialise_metrics(), os.path.join(self.output_dir, "metrics.json"))
+    def _persist_extra_artifacts(self) -> None:
         save_json(self._serialise_plan(), os.path.join(self.output_dir, "plan.json"))
         save_json({"events": self.shapley_history}, os.path.join(self.output_dir, "shapley_history.json"))
         save_json(self._serialise_privacy(), os.path.join(self.output_dir, "privacy.json"))
-        save_json(self._status_payload(completed), os.path.join(self.output_dir, "status.json"))
-        atomic_write_bytes(
-            os.path.join(self.output_dir, "checkpoint.pkl"),
-            pickle.dumps(self.get_checkpoint_state()),
-        )
-        try:
-            from .utils.visualization import generate_live_dashboard
-            generate_live_dashboard(self.metrics_history, self.output_dir)
-        except Exception:
-            pass
-        request_sync()
 
     def _is_complete(self) -> bool:
         if self.total_local_epochs is not None and self.completed_local_epochs >= self.total_local_epochs:
@@ -3778,78 +3679,3 @@ class RoSEHFLStrategy(ShapeFlStrategy):
             "replanned": int(replanned),
         }
 
-    def configure_evaluate(
-        self,
-        server_round: int,
-        parameters: Parameters,
-        client_manager: ClientManager,
-    ) -> List[Tuple[ClientProxy, EvaluateIns]]:
-        if server_round == 0 and self._checkpoint_loaded:
-            return []
-        if self.evaluate_fn is not None:
-            return []
-        if self.phase == "warmup" or self.edge_epoch != 0 or self.cloud_round == 0:
-            return []
-        clients = client_manager.sample(
-            num_clients=self.num_nodes,
-            min_num_clients=self.min_fit_clients,
-        )
-        return [(client, EvaluateIns(self.global_parameters, {})) for client in clients]
-
-    def aggregate_evaluate(
-        self,
-        server_round: int,
-        results: List[Tuple[ClientProxy, EvaluateRes]],
-        failures: List[Union[Tuple[ClientProxy, EvaluateRes], BaseException]],
-    ) -> Tuple[Optional[float], Dict[str, Scalar]]:
-        if not results:
-            return None, {}
-        for client_proxy, eval_res in results:
-            self._cid_mapper.register_from_metrics(client_proxy.cid, eval_res.metrics)
-        total_examples = sum(result.num_examples for _, result in results)
-        if total_examples == 0:
-            return None, {}
-        weighted_loss = sum(result.loss * result.num_examples for _, result in results) / total_examples
-        weighted_accuracy = sum(
-            result.metrics.get("accuracy", 0.0) * result.num_examples
-            for _, result in results
-        ) / total_examples
-        self._record_completed_cloud_metrics(
-            accuracy=weighted_accuracy,
-            loss=weighted_loss,
-        )
-        self._persist_artifacts(completed=self._is_complete())
-        print(
-            f"  RoSE Cloud Round {self.cloud_round}/{self.kappa} | "
-            f"Acc: {weighted_accuracy:.4f} | Loss: {weighted_loss:.4f} | "
-            f"BaseCost: {self.cumulative_cost_gb:.4f} GB | "
-            f"CommCost: {self.communication_cumulative_cost_gb:.4f} GB"
-        )
-        return weighted_loss, {"accuracy": weighted_accuracy}
-
-    def evaluate(
-        self,
-        server_round: int,
-        parameters: Parameters,
-    ) -> Optional[Tuple[float, Dict[str, Scalar]]]:
-        if self.evaluate_fn is None:
-            return None
-        if server_round == 0 and self._checkpoint_loaded:
-            return None
-        if self.phase == "warmup" or self.edge_epoch != 0 or self.cloud_round == 0:
-            return None
-        params = parameters_to_ndarrays(parameters)
-        loss, metrics = self.evaluate_fn(server_round, params, {})
-        accuracy = metrics.get("accuracy", 0.0)
-        self._record_completed_cloud_metrics(
-            accuracy=accuracy,
-            loss=loss,
-        )
-        self._persist_artifacts(completed=self._is_complete())
-        print(
-            f"  RoSE Cloud Round {self.cloud_round}/{self.kappa} | "
-            f"Acc: {accuracy:.4f} | Loss: {loss:.4f} | "
-            f"BaseCost: {self.cumulative_cost_gb:.4f} GB | "
-            f"CommCost: {self.communication_cumulative_cost_gb:.4f} GB"
-        )
-        return loss, metrics
