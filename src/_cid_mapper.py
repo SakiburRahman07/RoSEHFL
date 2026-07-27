@@ -42,7 +42,7 @@ class CidMapper:
             return self.cid_to_node_id[cid]
         node_id = self._sort_order_index(cid)
         logger.warning(
-            "CID %s resolved via sort-order to node_id=%d (no metrics yet). ",
+            "CID %s resolved via sort-order to node_id=%d. ",
             cid[:12], node_id,
         )
         return node_id

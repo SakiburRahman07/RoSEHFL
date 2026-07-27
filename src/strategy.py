@@ -1562,11 +1562,6 @@ class RoSEHFLStrategy(ShapeFlStrategy):
         probe_emit_mode: str = "always",
         client_compression_start_cloud_round: int = 2,
         edge_compression_start_cloud_round: int = 2,
-        server_optimizer: str = "none",
-        server_lr: float = 0.03,
-        server_beta1: float = 0.9,
-        server_beta2: float = 0.99,
-        server_tau: float = 1e-3,
         hard_edge_min_members: int = 0,
     ):
         super().__init__(
@@ -1659,14 +1654,6 @@ class RoSEHFLStrategy(ShapeFlStrategy):
         self.probe_emit_mode = probe_emit_mode_name
         self.client_compression_start_cloud_round = int(max(client_compression_start_cloud_round, 1))
         self.edge_compression_start_cloud_round = int(max(edge_compression_start_cloud_round, 1))
-        server_optimizer_name = str(server_optimizer or "none").strip().lower()
-        if server_optimizer_name not in {"none", "fedadam"}:
-            raise ValueError("server_optimizer must be either 'none' or 'fedadam'")
-        self.server_optimizer = server_optimizer_name
-        self.server_lr = float(max(server_lr, 0.0))
-        self.server_beta1 = float(np.clip(server_beta1, 0.0, 1.0))
-        self.server_beta2 = float(np.clip(server_beta2, 0.0, 1.0))
-        self.server_tau = float(max(server_tau, 1e-12))
         self.hard_edge_min_members = int(max(hard_edge_min_members, 0))
         self._planning_candidate_pool_size = 6
 
@@ -1694,9 +1681,6 @@ class RoSEHFLStrategy(ShapeFlStrategy):
         self.model_size_bytes = dense_payload_num_bytes(self._current_cycle_reference_weights)
         self.client_compression_residuals: Dict[int, List[np.ndarray]] = {}
         self.edge_compression_residuals: Dict[int, List[np.ndarray]] = {}
-        self.server_momentum_state: List[np.ndarray] = []
-        self.server_variance_state: List[np.ndarray] = []
-        self.server_optimizer_step = 0
         self.current_cycle_model_payload_bytes = 0
         self.current_cycle_probe_payload_bytes = 0
         self.current_cycle_communication_cost_gb = 0.0
@@ -1721,6 +1705,12 @@ class RoSEHFLStrategy(ShapeFlStrategy):
             "cpu",
         )
         self.parameter_keys = list(metadata_model.state_dict().keys())
+        # Used to exempt BatchNorm layers from compression (small, precision-
+        # sensitive). Under local_bn, per-client BN personalization already
+        # happens client-side (FlClient.set_parameters/get_parameters never
+        # exchange a client's own BN state with the server's), so the server
+        # just needs the normal weighted average of what clients honestly
+        # report - no separate masking of these indices is needed here.
         self.bn_parameter_indices = state_key_indices(
             self.parameter_keys,
             batch_norm_state_keys(metadata_model),
@@ -1772,18 +1762,6 @@ class RoSEHFLStrategy(ShapeFlStrategy):
             (layer * scale).astype(weights_list[0][layer_idx].dtype)
             for layer_idx, layer in enumerate(aggregate)
         ]
-
-    def _mask_batch_norm_weights(
-        self,
-        weights: List[np.ndarray],
-        reference_weights: List[np.ndarray],
-    ) -> List[np.ndarray]:
-        if not self.local_bn or not self.bn_parameter_indices:
-            return weights
-        masked = self._weights_copy(weights)
-        for index in self.bn_parameter_indices:
-            masked[index] = reference_weights[index].copy()
-        return masked
 
     def _update_edge_swa_buffer(
         self,
@@ -1870,11 +1848,6 @@ class RoSEHFLStrategy(ShapeFlStrategy):
             "probe_emit_mode": self.probe_emit_mode,
             "client_compression_start_cloud_round": int(self.client_compression_start_cloud_round),
             "edge_compression_start_cloud_round": int(self.edge_compression_start_cloud_round),
-            "server_optimizer": self.server_optimizer,
-            "server_lr": float(self.server_lr),
-            "server_beta1": float(self.server_beta1),
-            "server_beta2": float(self.server_beta2),
-            "server_tau": float(self.server_tau),
             "hard_edge_min_members": int(self.hard_edge_min_members),
             "selected_edges": sorted(int(edge_id) for edge_id in self.selected_edges),
             "edge_nodes": {
@@ -1953,11 +1926,6 @@ class RoSEHFLStrategy(ShapeFlStrategy):
             "edge_min_members": self.edge_min_members,
             "edge_underfill_penalty": self.edge_underfill_penalty,
             "hard_edge_min_members": int(self.hard_edge_min_members),
-            "server_optimizer": self.server_optimizer,
-            "server_lr": float(self.server_lr),
-            "server_beta1": float(self.server_beta1),
-            "server_beta2": float(self.server_beta2),
-            "server_tau": float(self.server_tau),
             "total_probe_payload_bytes": int(self.total_probe_payload_bytes),
             "average_probe_payload_bytes_per_round": avg_bytes,
             "per_round_probe_payload_bytes": [int(value) for value in self.round_probe_payload_bytes],
@@ -1990,7 +1958,6 @@ class RoSEHFLStrategy(ShapeFlStrategy):
             "agg_rule": self.agg_rule,
             "trust_use_shrinkage": self.trust_use_shrinkage,
             "target_accuracy": self.target_accuracy,
-            "server_optimizer": self.server_optimizer,
             "probe_emit_mode": self.probe_emit_mode,
             "edge_swa_k": self.edge_swa_k,
             "adaptive_gamma_eta": self.adaptive_gamma_eta,
@@ -2041,11 +2008,6 @@ class RoSEHFLStrategy(ShapeFlStrategy):
             "probe_emit_mode": self.probe_emit_mode,
             "client_compression_start_cloud_round": self.client_compression_start_cloud_round,
             "edge_compression_start_cloud_round": self.edge_compression_start_cloud_round,
-            "server_optimizer": self.server_optimizer,
-            "server_lr": self.server_lr,
-            "server_beta1": self.server_beta1,
-            "server_beta2": self.server_beta2,
-            "server_tau": self.server_tau,
             "hard_edge_min_members": self.hard_edge_min_members,
             "plan_history": self.plan_history,
             "shapley_history": self.shapley_history,
@@ -2087,9 +2049,6 @@ class RoSEHFLStrategy(ShapeFlStrategy):
                 int(node_id): int(value)
                 for node_id, value in self._latest_probe_payload_bytes.items()
             },
-            "server_momentum_state": self._weights_copy(self.server_momentum_state),
-            "server_variance_state": self._weights_copy(self.server_variance_state),
-            "server_optimizer_step": int(self.server_optimizer_step),
             "numpy_rng_state": np.random.get_state(),
             "partition_hash": self._partition_hash,
             "hyperparameters": self._get_hyperparameters(),
@@ -2172,11 +2131,6 @@ class RoSEHFLStrategy(ShapeFlStrategy):
                 self.edge_compression_start_cloud_round,
             )
         )
-        self.server_optimizer = str(state.get("server_optimizer", self.server_optimizer))
-        self.server_lr = float(state.get("server_lr", self.server_lr))
-        self.server_beta1 = float(state.get("server_beta1", self.server_beta1))
-        self.server_beta2 = float(state.get("server_beta2", self.server_beta2))
-        self.server_tau = float(state.get("server_tau", self.server_tau))
         self.hard_edge_min_members = int(
             state.get("hard_edge_min_members", self.hard_edge_min_members)
         )
@@ -2228,9 +2182,6 @@ class RoSEHFLStrategy(ShapeFlStrategy):
             int(node_id): int(value)
             for node_id, value in state.get("latest_probe_payload_bytes", {}).items()
         }
-        self.server_momentum_state = self._weights_copy(state.get("server_momentum_state", []))
-        self.server_variance_state = self._weights_copy(state.get("server_variance_state", []))
-        self.server_optimizer_step = int(state.get("server_optimizer_step", 0))
         if "numpy_rng_state" in state:
             np.random.set_state(state["numpy_rng_state"])
         _validate_checkpoint(
@@ -2380,63 +2331,6 @@ class RoSEHFLStrategy(ShapeFlStrategy):
             return True
         edge_nodes = candidate.get("edge_nodes", {})
         return all(len(nodes) >= minimum_members for nodes in edge_nodes.values())
-
-    def _ensure_server_optimizer_state(
-        self,
-        reference_weights: List[np.ndarray],
-    ) -> None:
-        if (
-            len(self.server_momentum_state) != len(reference_weights)
-            or len(self.server_variance_state) != len(reference_weights)
-        ):
-            self.server_momentum_state = zero_residuals_like(reference_weights)
-            self.server_variance_state = zero_residuals_like(reference_weights)
-            self.server_optimizer_step = 0
-
-    def _apply_server_optimizer(
-        self,
-        *,
-        reference_weights: List[np.ndarray],
-        aggregated_weights: List[np.ndarray],
-        update_state: bool,
-    ) -> List[np.ndarray]:
-        if self.server_optimizer != "fedadam":
-            return self._weights_copy(aggregated_weights)
-
-        self._ensure_server_optimizer_state(reference_weights)
-        momentum_state = (
-            self.server_momentum_state
-            if update_state
-            else self._weights_copy(self.server_momentum_state)
-        )
-        variance_state = (
-            self.server_variance_state
-            if update_state
-            else self._weights_copy(self.server_variance_state)
-        )
-
-        updated_weights: List[np.ndarray] = []
-        for index, (reference, aggregated) in enumerate(zip(reference_weights, aggregated_weights)):
-            reference_float = reference.astype(np.float64, copy=False)
-            delta = aggregated.astype(np.float64, copy=False) - reference_float
-            momentum = (
-                self.server_beta1 * momentum_state[index].astype(np.float64, copy=False)
-                + (1.0 - self.server_beta1) * delta
-            )
-            variance = (
-                self.server_beta2 * variance_state[index].astype(np.float64, copy=False)
-                + (1.0 - self.server_beta2) * np.square(delta)
-            )
-            step = reference_float + self.server_lr * momentum / (np.sqrt(variance) + self.server_tau)
-            momentum_state[index] = momentum.astype(reference.dtype, copy=False)
-            variance_state[index] = variance.astype(reference.dtype, copy=False)
-            updated_weights.append(step.astype(reference.dtype, copy=False))
-
-        if update_state:
-            self.server_momentum_state = momentum_state
-            self.server_variance_state = variance_state
-            self.server_optimizer_step += 1
-        return updated_weights
 
     def _reset_cycle_accounting(self) -> None:
         self.current_cycle_model_payload_bytes = 0
@@ -2912,8 +2806,6 @@ class RoSEHFLStrategy(ShapeFlStrategy):
                 nu=self.trust_nu,
                 dev_clip_q=self.trust_dev_clip_q,
             )
-            aggregate = self._mask_batch_norm_weights(aggregate, global_reference_weights)
-
             transmitted_edge_weights = self._weights_copy(aggregate)
             payload_bytes = int(self.model_size_bytes)
             if compress_edges_this_cycle and self.compress_edge_to_cloud:
@@ -2938,15 +2830,6 @@ class RoSEHFLStrategy(ShapeFlStrategy):
 
         if edge_weights:
             simulated_global = _weighted_average(edge_weights, edge_sizes)
-            simulated_global = self._mask_batch_norm_weights(
-                simulated_global,
-                global_reference_weights,
-            )
-            simulated_global = self._apply_server_optimizer(
-                reference_weights=global_reference_weights,
-                aggregated_weights=simulated_global,
-                update_state=False,
-            )
         else:
             simulated_global = self._weights_copy(global_reference_weights)
 
@@ -3641,10 +3524,6 @@ class RoSEHFLStrategy(ShapeFlStrategy):
             list(client_weights.values()),
             list(client_sizes.values()),
         )
-        warmup_global = self._mask_batch_norm_weights(
-            warmup_global,
-            parameters_to_ndarrays(self.global_parameters),
-        )
         self.global_parameters = ndarrays_to_parameters(warmup_global)
         self.completed_local_epochs += self.warmup_epochs
         self._plan_with_signal(
@@ -3770,10 +3649,6 @@ class RoSEHFLStrategy(ShapeFlStrategy):
                 nu=self.trust_nu,
                 dev_clip_q=self.trust_dev_clip_q,
             )
-            reference_weights = parameters_to_ndarrays(
-                self.edge_parameters.get(int(edge_id), self.global_parameters)
-            )
-            aggregate = self._mask_batch_norm_weights(aggregate, reference_weights)
             self._update_edge_swa_buffer(int(edge_id), aggregate)
             self.edge_parameters[int(edge_id)] = ndarrays_to_parameters(aggregate)
             serialisable_info = {"rule": info["rule"], "nodes": [int(node_id) for node_id in nodes]}
@@ -3810,10 +3685,6 @@ class RoSEHFLStrategy(ShapeFlStrategy):
             edge_weights_current = self._edge_swa_average(int(edge_id))
             if edge_weights_current is None:
                 edge_weights_current = parameters_to_ndarrays(self.edge_parameters[edge_id])
-            edge_weights_current = self._mask_batch_norm_weights(
-                edge_weights_current,
-                parameters_to_ndarrays(self.global_parameters),
-            )
             transmitted_edge_weights = self._weights_copy(edge_weights_current)
             payload_bytes = self.model_size_bytes
             if compress_edges_this_cycle and self.compress_edge_to_cloud:
@@ -3848,15 +3719,6 @@ class RoSEHFLStrategy(ShapeFlStrategy):
 
         if edge_weights:
             global_average = _weighted_average(edge_weights, edge_sizes)
-            global_average = self._mask_batch_norm_weights(
-                global_average,
-                parameters_to_ndarrays(self.global_parameters),
-            )
-            global_average = self._apply_server_optimizer(
-                reference_weights=global_reference_weights,
-                aggregated_weights=global_average,
-                update_state=True,
-            )
             self.global_parameters = ndarrays_to_parameters(global_average)
 
         self._finalise_completed_cycle(
@@ -3991,19 +3853,3 @@ class RoSEHFLStrategy(ShapeFlStrategy):
             f"CommCost: {self.communication_cumulative_cost_gb:.4f} GB"
         )
         return loss, metrics
-
-class RoseHFLStrategy(RoSEHFLStrategy):
-
-    def __init__(self, **kwargs):
-        kwargs.setdefault("server_optimizer", "none")
-        kwargs.setdefault("local_objective_prox_mu", 0.0)
-        super().__init__(**kwargs)
-
-    def _apply_server_optimizer(
-        self,
-        *,
-        reference_weights: List[np.ndarray],
-        aggregated_weights: List[np.ndarray],
-        update_state: bool,
-    ) -> List[np.ndarray]:
-        return self._weights_copy(aggregated_weights)

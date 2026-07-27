@@ -118,11 +118,6 @@ class RoSESmokeTests(unittest.TestCase):
                 probe_emit_mode="cycle_start",
                 client_compression_start_cloud_round=3,
                 edge_compression_start_cloud_round=4,
-                server_optimizer="fedadam",
-                server_lr=0.03,
-                server_beta1=0.9,
-                server_beta2=0.99,
-                server_tau=1e-3,
                 hard_edge_min_members=3,
             )
 
@@ -177,11 +172,6 @@ class RoSESmokeTests(unittest.TestCase):
                 probe_emit_mode="cycle_start",
                 client_compression_start_cloud_round=3,
                 edge_compression_start_cloud_round=4,
-                server_optimizer="fedadam",
-                server_lr=0.03,
-                server_beta1=0.9,
-                server_beta2=0.99,
-                server_tau=1e-3,
                 hard_edge_min_members=3,
             )
             resumed.load_checkpoint_state(checkpoint)
@@ -225,7 +215,6 @@ class RoSESmokeTests(unittest.TestCase):
             self.assertAlmostEqual(float(plan["accuracy_guard_tolerance"]), 0.02, places=6)
             self.assertEqual(int(plan["effective_planning_start_cloud_round"]), 3)
             self.assertEqual(plan["probe_emit_mode"], "cycle_start")
-            self.assertEqual(plan["server_optimizer"], "fedadam")
             self.assertEqual(int(plan["hard_edge_min_members"]), 3)
             self.assertTrue(plan["plan_history"])
             first_event = plan["plan_history"][0]
@@ -244,7 +233,6 @@ class RoSESmokeTests(unittest.TestCase):
             self.assertEqual(privacy["probe_emit_mode"], "cycle_start")
             self.assertEqual(int(privacy["client_compression_start_cloud_round"]), 3)
             self.assertEqual(int(privacy["edge_compression_start_cloud_round"]), 4)
-            self.assertEqual(privacy["server_optimizer"], "fedadam")
 
 
 if __name__ == "__main__":

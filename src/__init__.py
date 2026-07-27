@@ -20,7 +20,6 @@ from .client import FlClient, client_fn_factory
 from .strategy import (
     ShapeFlStrategy,
     RoSEHFLStrategy,
-    RoseHFLStrategy,
     FedAvgFlatStrategy,
     FedProxFlatStrategy,
 )
@@ -33,7 +32,6 @@ __all__ = [
     "client_fn_factory",
     "ShapeFlStrategy",
     "RoSEHFLStrategy",
-    "RoseHFLStrategy",
     "FedAvgFlatStrategy",
     "FedProxFlatStrategy",
     "compute_smc_shapley",

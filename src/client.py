@@ -50,27 +50,27 @@ class FlClient(fl.client.NumPyClient):
         self.local_bn = bool(local_bn)
         self._state_keys = list(self.model.state_dict().keys())
         self._bn_state_keys = batch_norm_state_keys(self.model)
-        self._server_parameters: Optional[List[np.ndarray]] = None
 
     def get_parameters(self, config=None) -> NDArrays:
-        arrays = [value.detach().cpu().numpy() for _, value in self.model.state_dict().items()]
-        if not self.local_bn or not self._bn_state_keys or self._server_parameters is None:
-            return arrays
-        return [
-            self._server_parameters[index].copy()
-            if key in self._bn_state_keys
-            else arrays[index]
-            for index, key in enumerate(self._state_keys)
-        ]
+        # Always report the model's real current state, including BatchNorm
+        # buffers. Under local_bn, this client never had the server's BN
+        # loaded in (see set_parameters below), so these BN values are its
+        # own locally-adapted statistics, not a copy of anything the server
+        # sent it.
+        return [value.detach().cpu().numpy() for _, value in self.model.state_dict().items()]
 
     def get_properties(self, config=None) -> Dict[str, object]:
         return {"node_id": int(self.node_id) if self.node_id is not None else -1}
 
     def set_parameters(self, parameters: NDArrays) -> None:
-        self._server_parameters = [np.asarray(value).copy() for value in parameters]
         current_state = OrderedDict(self.model.state_dict())
         for key, value in zip(self._state_keys, parameters):
             if self.local_bn and key in self._bn_state_keys:
+                # FedBN: keep this client's own BatchNorm statistics instead
+                # of overwriting them with the server's (which, under
+                # local_bn, is only ever a cross-client average kept for
+                # centralized reporting, not something clients should train
+                # from).
                 continue
             current_state[key] = torch.tensor(np.asarray(value))
         self.model.load_state_dict(current_state, strict=True)

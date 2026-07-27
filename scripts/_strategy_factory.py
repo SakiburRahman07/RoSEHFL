@@ -7,7 +7,7 @@ from __future__ import annotations
 from src.strategy import (
     FedAvgFlatStrategy,
     FedProxFlatStrategy,
-    RoseHFLStrategy,
+    RoSEHFLStrategy,
     ShapeFlStrategy,
     generate_communication_costs,
 )
@@ -91,7 +91,7 @@ def build_strategy(name: str, args, shared, output_dir: str):
         target_accuracy = default_target_accuracy(args.dataset)
 
     if name == "rosehfl":
-        return RoseHFLStrategy(
+        return RoSEHFLStrategy(
             model_name=args.model,
             dataset_name=args.dataset,
             num_nodes=args.num_nodes,
@@ -148,7 +148,6 @@ def build_strategy(name: str, args, shared, output_dir: str):
             probe_emit_mode="cycle_start",
             client_compression_start_cloud_round=3,
             edge_compression_start_cloud_round=4,
-            server_optimizer="none",
             hard_edge_min_members=3,
         )
     if name in HIERARCHICAL_SHAPEFL_MODES:

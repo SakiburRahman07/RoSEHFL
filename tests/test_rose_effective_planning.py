@@ -518,48 +518,6 @@ class RoSEQ1SPlanningTests(unittest.TestCase):
             )
         )
 
-    def test_fedadam_checkpoint_resume_preserves_update_trajectory(self):
-        strategy = _strategy(
-            server_optimizer="fedadam",
-            server_lr=0.03,
-            server_beta1=0.9,
-            server_beta2=0.99,
-            server_tau=1e-3,
-        )
-        reference = [np.zeros((2,), dtype=np.float32)]
-        first_aggregate = [np.array([1.0, -1.0], dtype=np.float32)]
-        second_aggregate = [np.array([0.5, 0.25], dtype=np.float32)]
-
-        first_update = strategy._apply_server_optimizer(
-            reference_weights=reference,
-            aggregated_weights=first_aggregate,
-            update_state=True,
-        )
-        checkpoint = strategy.get_checkpoint_state()
-
-        resumed = _strategy(
-            server_optimizer="fedadam",
-            server_lr=0.03,
-            server_beta1=0.9,
-            server_beta2=0.99,
-            server_tau=1e-3,
-        )
-        resumed.load_checkpoint_state(checkpoint)
-
-        continued = strategy._apply_server_optimizer(
-            reference_weights=first_update,
-            aggregated_weights=second_aggregate,
-            update_state=True,
-        )
-        resumed_continued = resumed._apply_server_optimizer(
-            reference_weights=first_update,
-            aggregated_weights=second_aggregate,
-            update_state=True,
-        )
-
-        self.assertEqual(strategy.server_optimizer_step, resumed.server_optimizer_step)
-        self.assertTrue(np.allclose(continued[0], resumed_continued[0]))
-
 
 if __name__ == "__main__":
     unittest.main()
