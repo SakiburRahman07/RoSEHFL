@@ -137,7 +137,7 @@ def build_strategy(name: str, args, shared, output_dir: str):
             edge_underfill_penalty=_edge_underfill_penalty(args),
             local_objective_prox_mu=0.0,
             logit_adjustment_tau=1.0,
-            local_bn=True,
+            local_bn=False,
             edge_swa_k=3,
             planning_objective="effective",
             target_accuracy=target_accuracy,

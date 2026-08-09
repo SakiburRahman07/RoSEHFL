@@ -155,7 +155,7 @@ def main() -> None:
                         replan_cost_increase_tolerance=0.1,
                         local_objective_prox_mu=0.01,
                         logit_adjustment_tau=1.0,
-                        local_bn=True,
+                        local_bn=False,
                         edge_swa_k=3,
                     )
                 elif strategy_name == "full_minus_c4":
@@ -195,7 +195,9 @@ def main() -> None:
                         replan_cost_increase_tolerance=0.1,
                         local_objective_prox_mu=0.01,
                         logit_adjustment_tau=1.0,
-                        local_bn=True,
+                        # See _strategy_factory.py: local_bn requires client-side BN
+                        # persistence that Flower's simulation does not provide.
+                        local_bn=False,
                         edge_swa_k=3,
                     )
                 elif strategy_name in {"median", "trimmed_mean", "krum"}:
