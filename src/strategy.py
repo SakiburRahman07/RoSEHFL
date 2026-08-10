@@ -7,7 +7,7 @@ It provides four strategy families:
     1) ShapeFlStrategy   - baseline three-tier hierarchical FL strategy.
     2) RoSEHFLStrategy   - adaptive extension with probe-driven planning,
                            dynamic replanning, robust aggregation, and
-                           effective-cost-aware accounting.
+                           communication-cost-aware accounting.
     3) FedAvgFlatStrategy - flat (no hierarchy) baseline.
     4) FedProxFlatStrategy - flat FedProx baseline.
 
@@ -799,7 +799,7 @@ class ShapeFlStrategy(_FlowerStrategyBase):
         if not probe_payload_bytes or not node_edge_map:
             return 0.0
 
-        effective_cost_gb = 0.0
+        communication_cost_gb = 0.0
         edge_forward_payloads: Dict[int, int] = defaultdict(int)
         for node_id, payload_bytes in probe_payload_bytes.items():
             payload = int(payload_bytes)
@@ -809,7 +809,7 @@ class ShapeFlStrategy(_FlowerStrategyBase):
             if edge_id is None:
                 continue
             edge_key = int(edge_id)
-            effective_cost_gb += scaled_cost_from_payload(
+            communication_cost_gb += scaled_cost_from_payload(
                 self.c_ne.get((int(node_id), edge_key), 0.0),
                 payload,
                 self.model_size_bytes,
@@ -817,12 +817,12 @@ class ShapeFlStrategy(_FlowerStrategyBase):
             edge_forward_payloads[edge_key] += payload
 
         for edge_id, payload in edge_forward_payloads.items():
-            effective_cost_gb += scaled_cost_from_payload(
+            communication_cost_gb += scaled_cost_from_payload(
                 self.c_ec.get(int(edge_id), 0.0),
                 int(payload),
                 self.model_size_bytes,
             )
-        return float(effective_cost_gb)
+        return float(communication_cost_gb)
 
     def _record_probe_payload_cost(
         self,
@@ -858,11 +858,11 @@ class ShapeFlStrategy(_FlowerStrategyBase):
     def _finalise_completed_cycle(
         self,
         *,
-        paper_cost_gb: float,
+        baseline_cost_gb: float,
     ) -> None:
-        self.cumulative_cost_gb += float(paper_cost_gb)
+        self.cumulative_cost_gb += float(baseline_cost_gb)
         self.communication_cumulative_cost_gb += float(self.current_cycle_communication_cost_gb)
-        self._reported_baseline_per_round_cost_gb = float(paper_cost_gb)
+        self._reported_baseline_per_round_cost_gb = float(baseline_cost_gb)
         self._reported_communication_per_round_cost_gb = float(self.current_cycle_communication_cost_gb)
         self._reported_model_payload_bytes = int(self.current_cycle_model_payload_bytes)
         self._reported_probe_payload_bytes = int(self.current_cycle_probe_payload_bytes)
@@ -1003,7 +1003,7 @@ class ShapeFlStrategy(_FlowerStrategyBase):
                     payload_bytes=payload_bytes,
                 )
             self._finalise_completed_cycle(
-                paper_cost_gb=self._baseline_cost_for_completed_cycle(self.edge_epoch)
+                baseline_cost_gb=self._baseline_cost_for_completed_cycle(self.edge_epoch)
             )
             self.edge_epoch = 0
             self.cloud_round += 1
@@ -2259,11 +2259,11 @@ class RoSEHFLStrategy(ShapeFlStrategy):
     def _finalise_completed_cycle(
         self,
         *,
-        paper_cost_gb: float,
+        baseline_cost_gb: float,
     ) -> None:
-        self.cumulative_cost_gb += float(paper_cost_gb)
+        self.cumulative_cost_gb += float(baseline_cost_gb)
         self.communication_cumulative_cost_gb += float(self.current_cycle_communication_cost_gb)
-        self._reported_baseline_per_round_cost_gb = float(paper_cost_gb)
+        self._reported_baseline_per_round_cost_gb = float(baseline_cost_gb)
         self._reported_communication_per_round_cost_gb = float(self.current_cycle_communication_cost_gb)
         self._reported_model_payload_bytes = int(self.current_cycle_model_payload_bytes)
         self._reported_probe_payload_bytes = int(self.current_cycle_probe_payload_bytes)
@@ -2651,7 +2651,7 @@ class RoSEHFLStrategy(ShapeFlStrategy):
         )
         global_reference_weights = self._weights_copy(self._current_cycle_reference_weights)
 
-        effective_cost_gb = 0.0
+        communication_cost_gb = 0.0
         model_payload_bytes = 0
         probe_total_payload_bytes = 0
         edge_groups: Dict[int, Dict[str, object]] = defaultdict(
@@ -2663,7 +2663,7 @@ class RoSEHFLStrategy(ShapeFlStrategy):
             if payload > 0:
                 probe_total_payload_bytes += payload
         if include_probe_payload:
-            effective_cost_gb += self._communication_probe_payload_cost(
+            communication_cost_gb += self._communication_probe_payload_cost(
                 probe_payload_bytes={
                     int(node_id): int(payload_bytes)
                     for node_id, payload_bytes in (probe_payload_bytes or {}).items()
@@ -2690,7 +2690,7 @@ class RoSEHFLStrategy(ShapeFlStrategy):
                 payload_bytes = int(compression.payload_bytes)
 
             model_payload_bytes += payload_bytes
-            effective_cost_gb += scaled_cost_from_payload(
+            communication_cost_gb += scaled_cost_from_payload(
                 self.c_ne.get((int(node_id), int(edge_id)), 0.0),
                 payload_bytes,
                 self.model_size_bytes,
@@ -2739,7 +2739,7 @@ class RoSEHFLStrategy(ShapeFlStrategy):
                 payload_bytes = int(compression.payload_bytes)
 
             model_payload_bytes += payload_bytes
-            effective_cost_gb += scaled_cost_from_payload(
+            communication_cost_gb += scaled_cost_from_payload(
                 self.c_ec.get(int(edge_id), 0.0),
                 payload_bytes,
                 self.model_size_bytes,
@@ -2760,7 +2760,7 @@ class RoSEHFLStrategy(ShapeFlStrategy):
         )
         return {
             "baseline_per_round_cost_gb": float(self._estimate_plan_cost_gb(candidate["edge_nodes"])),
-            "communication_per_round_cost_gb": float(effective_cost_gb),
+            "communication_per_round_cost_gb": float(communication_cost_gb),
             "simulated_probe_accuracy": float(simulated_probe_accuracy),
             "model_payload_bytes": int(model_payload_bytes),
             "probe_payload_bytes": int(probe_total_payload_bytes),
@@ -3641,7 +3641,7 @@ class RoSEHFLStrategy(ShapeFlStrategy):
             self.global_parameters = ndarrays_to_parameters(global_average)
 
         self._finalise_completed_cycle(
-            paper_cost_gb=self._baseline_cost_for_completed_cycle(self.edge_epoch)
+            baseline_cost_gb=self._baseline_cost_for_completed_cycle(self.edge_epoch)
         )
         self.cloud_round += 1
         self.edge_epoch = 0

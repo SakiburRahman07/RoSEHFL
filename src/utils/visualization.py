@@ -588,9 +588,9 @@ def generate_live_dashboard(metrics: Dict[str, List], output_dir: str) -> None:
 
     accs = metrics.get("accuracy", [])
     losses = metrics.get("loss", [])
-    baseline_costs = metrics.get("baseline_cumulative_cost_gb", metrics.get("paper_cumulative_cost_gb", []))
-    communication_costs = metrics.get("communication_cumulative_cost_gb", metrics.get("effective_cumulative_cost_gb", []))
-    per_round_costs = metrics.get("baseline_per_round_cost_gb", metrics.get("paper_per_round_cost_gb", []))
+    baseline_costs = metrics.get("baseline_cumulative_cost_gb", [])
+    communication_costs = metrics.get("communication_cumulative_cost_gb", [])
+    per_round_costs = metrics.get("baseline_per_round_cost_gb", [])
 
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
     fig.suptitle(f"Live Dashboard — Round {rounds[-1]}", fontsize=16, fontweight="bold")

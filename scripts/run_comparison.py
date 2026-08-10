@@ -55,7 +55,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_common_experiment_args(parser)
     add_multi_strategy_arg(parser, default=["shapefl", "rosehfl"])
-    parser.add_argument("--comparison-mode", type=str, default="effective", choices=["paper", "effective"])
+    parser.add_argument(
+        "--comparison-mode",
+        type=str,
+        default="communication",
+        choices=["baseline", "communication"],
+        help=(
+            "Which cost axis to compare on. 'baseline' is the uncompressed "
+            "per-round cost; 'communication' is the realized cost after "
+            "compression. (Formerly named 'paper'/'effective'.)"
+        ),
+    )
     parser.add_argument("--plot-title", type=str, default=None)
     parser.add_argument("--plot-dpi", type=int, default=180)
     return parser

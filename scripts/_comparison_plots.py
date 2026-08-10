@@ -89,20 +89,20 @@ def _first_round_at_or_above(values: list[float], threshold: float) -> int | Non
     return None
 
 
-def _accuracy_at_budget(accuracies: list[float], effective_costs: list[float], budget_gb: float) -> float | None:
-    for cost, accuracy in zip(effective_costs, accuracies):
+def _accuracy_at_budget(accuracies: list[float], communication_costs: list[float], budget_gb: float) -> float | None:
+    for cost, accuracy in zip(communication_costs, accuracies):
         if float(cost) >= float(budget_gb):
             return float(accuracy)
     return accuracies[-1] if accuracies else None
 
 
-def _cost_to_target(accuracies: list[float], effective_costs: list[float], target_accuracy: float | None) -> float | None:
+def _cost_to_target(accuracies: list[float], communication_costs: list[float], target_accuracy: float | None) -> float | None:
     if target_accuracy is None:
         return None
     round_idx = _first_round_at_or_above(accuracies, target_accuracy)
     if round_idx is None:
         return None
-    return float(effective_costs[round_idx - 1])
+    return float(communication_costs[round_idx - 1])
 
 
 def _thresholds(target_accuracy: float | None, strategies: list[dict[str, Any]]) -> list[float]:
@@ -166,14 +166,15 @@ def load_comparison_dataset(result_json: Path) -> dict[str, Any]:
 
     common_communication_budget = (
         payload.get("common_communication_budget_gb")
-        or payload.get("effective_common_budget_gb")
-        or (payload.get("common_budget_gb") if payload.get("comparison_mode") == "effective" else None)
+        or payload.get("communication_common_budget_gb")
+        or (payload.get("common_budget_gb")
+            if payload.get("comparison_mode") == "communication" else None)
     )
 
     strategy_names = payload.get("strategy_names") or list(payload["per_round_metrics"].keys())
     strategy_names = _ordered_strategy_names(list(strategy_names))
     strategy_summaries = payload.get("strategy_summaries", {})
-    communication_summary = payload.get("communication_summary", payload.get("effective_summary", {}))
+    communication_summary = payload.get("communication_summary", {})
 
     strategies = {}
     for strategy_name in strategy_names:
@@ -181,14 +182,14 @@ def load_comparison_dataset(result_json: Path) -> dict[str, Any]:
         accuracies = _as_float_list(metrics.get("accuracy"))
         rounds = _as_int_list(metrics.get("cloud_round"))
         losses = _as_float_list(metrics.get("loss"))
-        paper_cumulative = _as_float_list(metrics.get("baseline_cumulative_cost_gb")) or _as_float_list(metrics.get("cumulative_cost_gb"))
-        effective_cumulative = _as_float_list(metrics.get("communication_cumulative_cost_gb")) or _as_float_list(metrics.get("cumulative_cost_gb"))
-        paper_per_round = _as_float_list(metrics.get("baseline_per_round_cost_gb")) or _as_float_list(metrics.get("per_round_cost_gb"))
-        effective_per_round = _as_float_list(metrics.get("communication_per_round_cost_gb")) or _as_float_list(metrics.get("per_round_cost_gb"))
+        baseline_cumulative = _as_float_list(metrics.get("baseline_cumulative_cost_gb")) or _as_float_list(metrics.get("cumulative_cost_gb"))
+        communication_cumulative = _as_float_list(metrics.get("communication_cumulative_cost_gb")) or _as_float_list(metrics.get("cumulative_cost_gb"))
+        baseline_per_round = _as_float_list(metrics.get("baseline_per_round_cost_gb")) or _as_float_list(metrics.get("per_round_cost_gb"))
+        communication_per_round = _as_float_list(metrics.get("communication_per_round_cost_gb")) or _as_float_list(metrics.get("per_round_cost_gb"))
         model_payload = _as_float_list(metrics.get("model_payload_bytes"))
         probe_payload = _as_float_list(metrics.get("probe_payload_bytes"))
 
-        if not rounds or not accuracies or not effective_cumulative:
+        if not rounds or not accuracies or not communication_cumulative:
             raise ValueError(f"{result_json} strategy '{strategy_name}' is missing required metrics.")
 
         strategy_summary = strategy_summaries.get(strategy_name, {})
@@ -201,10 +202,10 @@ def load_comparison_dataset(result_json: Path) -> dict[str, Any]:
                 "cloud_round": rounds,
                 "accuracy": accuracies,
                 "loss": losses,
-                "baseline_cumulative_cost_gb": paper_cumulative,
-                "communication_cumulative_cost_gb": effective_cumulative,
-                "baseline_per_round_cost_gb": paper_per_round,
-                "communication_per_round_cost_gb": effective_per_round,
+                "baseline_cumulative_cost_gb": baseline_cumulative,
+                "communication_cumulative_cost_gb": communication_cumulative,
+                "baseline_per_round_cost_gb": baseline_per_round,
+                "communication_per_round_cost_gb": communication_per_round,
                 "model_payload_bytes": model_payload,
                 "probe_payload_bytes": probe_payload,
             },
@@ -212,10 +213,10 @@ def load_comparison_dataset(result_json: Path) -> dict[str, Any]:
                 "final_accuracy": float(strategy_summary.get("final_accuracy", accuracies[-1])),
                 "best_accuracy": float(strategy_summary.get("best_accuracy", max(accuracies))),
                 "final_loss": float(strategy_summary.get("final_loss", losses[-1] if losses else 0.0)),
-                "final_baseline_cost_gb": float(strategy_summary.get("final_baseline_cost_gb", paper_cumulative[-1] if paper_cumulative else 0.0)),
-                "final_communication_cost_gb": float(strategy_summary.get("final_communication_cost_gb", effective_cumulative[-1])),
-                "baseline_per_round_cost_gb": float(strategy_summary.get("baseline_per_round_cost_gb", paper_per_round[-1] if paper_per_round else 0.0)),
-                "communication_per_round_cost_gb": float(strategy_summary.get("communication_per_round_cost_gb", effective_per_round[-1] if effective_per_round else 0.0)),
+                "final_baseline_cost_gb": float(strategy_summary.get("final_baseline_cost_gb", baseline_cumulative[-1] if baseline_cumulative else 0.0)),
+                "final_communication_cost_gb": float(strategy_summary.get("final_communication_cost_gb", communication_cumulative[-1])),
+                "baseline_per_round_cost_gb": float(strategy_summary.get("baseline_per_round_cost_gb", baseline_per_round[-1] if baseline_per_round else 0.0)),
+                "communication_per_round_cost_gb": float(strategy_summary.get("communication_per_round_cost_gb", communication_per_round[-1] if communication_per_round else 0.0)),
                 "accuracy_at_common_budget": (
                     float(strategy_summary["communication_accuracy_at_common_budget"])
                     if strategy_summary.get("communication_accuracy_at_common_budget") is not None
@@ -223,7 +224,7 @@ def load_comparison_dataset(result_json: Path) -> dict[str, Any]:
                         float(mode_summary["accuracy_at_common_budget"])
                         if mode_summary.get("accuracy_at_common_budget") is not None
                         else (
-                            _accuracy_at_budget(accuracies, effective_cumulative, common_communication_budget)
+                            _accuracy_at_budget(accuracies, communication_cumulative, common_communication_budget)
                             if common_communication_budget is not None
                             else None
                         )
@@ -232,7 +233,7 @@ def load_comparison_dataset(result_json: Path) -> dict[str, Any]:
                 "communication_cost_to_target_gb": (
                     float(strategy_summary["communication_cost_to_target_gb"])
                     if strategy_summary.get("communication_cost_to_target_gb") is not None
-                    else _cost_to_target(accuracies, effective_cumulative, target_accuracy)
+                    else _cost_to_target(accuracies, communication_cumulative, target_accuracy)
                 ),
                 "rounds_to_target": (
                     int(strategy_summary["rounds_to_target"])
@@ -316,7 +317,7 @@ def plot_overview(dataset: dict[str, Any], output_path: Path, title: str, dpi: i
         summary = strategy["summary"]
         rounds = metrics["cloud_round"]
         accuracy_pct = [value * 100.0 for value in metrics["accuracy"]]
-        effective_costs = metrics["communication_cumulative_cost_gb"]
+        communication_costs = metrics["communication_cumulative_cost_gb"]
         loss = metrics["loss"]
         color = COLORS.get(name, "#333333")
         marker = MARKERS.get(name, "o")
@@ -324,11 +325,11 @@ def plot_overview(dataset: dict[str, Any], output_path: Path, title: str, dpi: i
 
         ax_acc_round.plot(rounds, accuracy_pct, color=color, marker=marker, linewidth=2.0, markersize=4, markevery=mark_every, label=label)
         ax_loss.plot(rounds, loss, color=color, marker=marker, linewidth=2.0, markersize=4, markevery=mark_every, label=label)
-        ax_cost_round.plot(rounds, effective_costs, color=color, marker=marker, linewidth=2.0, markersize=4, markevery=mark_every, label=label)
-        ax_acc_cost.plot(effective_costs, accuracy_pct, color=color, marker=marker, linewidth=2.0, markersize=4, markevery=mark_every, label=label)
+        ax_cost_round.plot(rounds, communication_costs, color=color, marker=marker, linewidth=2.0, markersize=4, markevery=mark_every, label=label)
+        ax_acc_cost.plot(communication_costs, accuracy_pct, color=color, marker=marker, linewidth=2.0, markersize=4, markevery=mark_every, label=label)
 
         final_round = rounds[-1]
-        final_cost = effective_costs[-1]
+        final_cost = communication_costs[-1]
         final_acc = summary["final_accuracy"] * 100.0
         ax_acc_round.scatter([final_round], [final_acc], color=color, edgecolors="black", s=70, zorder=5)
         ax_acc_cost.scatter([final_cost], [final_acc], color=color, edgecolors="black", s=70, zorder=5)
@@ -450,22 +451,22 @@ def plot_summary(dataset: dict[str, Any], output_path: Path, dpi: int) -> None:
 def plot_communication_efficiency(dataset: dict[str, Any], output_path: Path, dpi: int) -> None:
     strategies = _pick_strategies(dataset)
     labels = [s["display_name"] for s in strategies]
-    paper_costs = [s["summary"]["final_baseline_cost_gb"] or 0.0 for s in strategies]
-    effective_costs = [s["summary"]["final_communication_cost_gb"] or 0.0 for s in strategies]
+    baseline_costs = [s["summary"]["final_baseline_cost_gb"] or 0.0 for s in strategies]
+    communication_costs = [s["summary"]["final_communication_cost_gb"] or 0.0 for s in strategies]
     savings_pct = [
-        (1.0 - effective / paper) * 100.0 if paper > 0.0 else 0.0
-        for paper, effective in zip(paper_costs, effective_costs)
+        (1.0 - communication / baseline) * 100.0 if baseline > 0.0 else 0.0
+        for baseline, communication in zip(baseline_costs, communication_costs)
     ]
 
     x = list(range(len(strategies)))
     width = 0.32
     fig, ax = plt.subplots(figsize=(10, 6))
-    bars_paper = ax.bar([idx - width / 2 for idx in x], paper_costs, width=width, color="#5b9bd5", alpha=0.85, label="Baseline Cost", edgecolor="white", linewidth=1.2)
-    bars_effective = ax.bar([idx + width / 2 for idx in x], effective_costs, width=width, color="#ed7d31", alpha=0.95, label="Communication Cost", edgecolor="white", linewidth=1.2)
+    bars_baseline = ax.bar([idx - width / 2 for idx in x], baseline_costs, width=width, color="#5b9bd5", alpha=0.85, label="Baseline Cost", edgecolor="white", linewidth=1.2)
+    bars_communication = ax.bar([idx + width / 2 for idx in x], communication_costs, width=width, color="#ed7d31", alpha=0.95, label="Communication Cost", edgecolor="white", linewidth=1.2)
 
-    for bar, value in zip(bars_paper, paper_costs):
+    for bar, value in zip(bars_baseline, baseline_costs):
         ax.annotate(f"{value:.2f} GB", (bar.get_x() + bar.get_width() / 2, bar.get_height()), xytext=(0, 6), textcoords="offset points", ha="center", fontsize=11, fontweight="bold")
-    for bar, value, savings in zip(bars_effective, effective_costs, savings_pct):
+    for bar, value, savings in zip(bars_communication, communication_costs, savings_pct):
         text = f"{value:.2f} GB"
         if savings > 0.5:
             text += f"\n({savings:.1f}% saved)"
@@ -489,10 +490,10 @@ def plot_cost_savings_over_rounds(dataset: dict[str, Any], output_path: Path, dp
     for strategy in strategies:
         name = strategy["name"]
         rounds = strategy["metrics"]["cloud_round"]
-        paper = strategy["metrics"]["baseline_cumulative_cost_gb"]
-        effective = strategy["metrics"]["communication_cumulative_cost_gb"]
-        savings_gb = [paper_cost - effective_cost for paper_cost, effective_cost in zip(paper, effective)]
-        savings_pct = [(1.0 - (effective_cost / paper_cost)) * 100.0 if paper_cost > 0.0 else 0.0 for paper_cost, effective_cost in zip(paper, effective)]
+        baseline = strategy["metrics"]["baseline_cumulative_cost_gb"]
+        communication = strategy["metrics"]["communication_cumulative_cost_gb"]
+        savings_gb = [baseline_cost - communication_cost for baseline_cost, communication_cost in zip(baseline, communication)]
+        savings_pct = [(1.0 - (communication_cost / baseline_cost)) * 100.0 if baseline_cost > 0.0 else 0.0 for baseline_cost, communication_cost in zip(baseline, communication)]
         color = COLORS.get(name, "#333333")
         ax_left.plot(rounds, savings_gb, color=color, linewidth=2.5, label=f"{strategy['display_name']} (GB saved)", marker=MARKERS.get(name, "o"), markersize=4, markevery=max(1, len(rounds) // 10))
         ax_right.plot(rounds, savings_pct, color=color, linewidth=1.5, linestyle="--", alpha=0.6)
@@ -518,12 +519,12 @@ def plot_accuracy_vs_cost_zoomed(dataset: dict[str, Any], output_path: Path, dpi
     fig, ax = plt.subplots(figsize=(12, 7))
     for strategy in strategies:
         name = strategy["name"]
-        effective = strategy["metrics"]["communication_cumulative_cost_gb"]
+        communication = strategy["metrics"]["communication_cumulative_cost_gb"]
         acc_pct = [a * 100.0 for a in strategy["metrics"]["accuracy"]]
         color = COLORS.get(name, "#333333")
         marker = MARKERS.get(name, "o")
-        ax.plot(effective, acc_pct, color=color, marker=marker, linewidth=2.5, markersize=5, markevery=max(1, len(effective) // 15), label=strategy["display_name"])
-        ax.annotate(f"{acc_pct[-1]:.2f}%\n@ {effective[-1]:.2f} GB", (effective[-1], acc_pct[-1]), xytext=(-80, -25), textcoords="offset points", fontsize=10, fontweight="bold", color=color, arrowprops=dict(arrowstyle="->", color=color, lw=1.5))
+        ax.plot(communication, acc_pct, color=color, marker=marker, linewidth=2.5, markersize=5, markevery=max(1, len(communication) // 15), label=strategy["display_name"])
+        ax.annotate(f"{acc_pct[-1]:.2f}%\n@ {communication[-1]:.2f} GB", (communication[-1], acc_pct[-1]), xytext=(-80, -25), textcoords="offset points", fontsize=10, fontweight="bold", color=color, arrowprops=dict(arrowstyle="->", color=color, lw=1.5))
 
     if target_accuracy is not None:
         ax.axhline(y=float(target_accuracy) * 100.0, color="#666666", linestyle=":", linewidth=1.0, alpha=0.8)
@@ -581,11 +582,11 @@ def plot_cost_to_accuracy_thresholds(dataset: dict[str, Any], output_path: Path,
     for idx, strategy in enumerate(strategies):
         name = strategy["name"]
         accuracies = strategy["metrics"]["accuracy"]
-        effective_costs = strategy["metrics"]["communication_cumulative_cost_gb"]
+        communication_costs = strategy["metrics"]["communication_cumulative_cost_gb"]
         values = []
         for threshold in thresholds:
             round_idx = _first_round_at_or_above(accuracies, threshold)
-            values.append(effective_costs[round_idx - 1] if round_idx is not None else 0.0)
+            values.append(communication_costs[round_idx - 1] if round_idx is not None else 0.0)
         offset = (idx - (len(strategies) - 1) / 2) * width
         bars = ax.bar([value + offset for value in x], values, width=width, color=COLORS.get(name, "#333333"), alpha=0.85, label=strategy["display_name"], edgecolor="white", linewidth=1)
         for bar, value in zip(bars, values):

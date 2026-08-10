@@ -133,17 +133,22 @@ def update_run_status(output_dir: str, **changes) -> dict[str, Any]:
     return status
 
 
+COST_MODES = ("baseline", "communication")
+
+
 def _cost_series(metrics: dict[str, Any], mode: str, field: str) -> list[float]:
-    if mode == "paper":
-        values = metrics.get(f"paper_{field}")
-        if values:
-            return [float(value) for value in values]
-    if mode == "effective":
-        values = metrics.get(f"effective_{field}")
-        if values:
-            return [float(value) for value in values]
-    legacy = metrics.get(field, [])
-    return [float(value) for value in legacy]
+    """Return a cost series for ``mode`` ('baseline' or 'communication').
+
+    Falls back to the un-prefixed series when the requested one is absent,
+    which is what the flat baselines write (they have no compression, so
+    baseline and communication costs are identical).
+    """
+    if mode not in COST_MODES:
+        raise ValueError(f"_cost_series: mode must be one of {COST_MODES}, got {mode!r}")
+    values = metrics.get(f"{mode}_{field}")
+    if values:
+        return [float(value) for value in values]
+    return [float(value) for value in metrics.get(field, [])]
 
 
 def accuracy_at_budget(metrics: dict[str, Any], budget_gb: float, *, mode: str) -> float | None:
@@ -202,21 +207,23 @@ def build_strategy_summary(
         "final_accuracy": final_metric(metrics, "accuracy"),
         "best_accuracy": max([float(value) for value in metrics.get("accuracy", [])], default=None),
         "final_loss": final_metric(metrics, "loss"),
-        "final_baseline_cost_gb": final_metric(metrics, "paper_cumulative_cost_gb") or final_metric(metrics, "cumulative_cost_gb"),
-        "final_communication_cost_gb": final_metric(metrics, "effective_cumulative_cost_gb") or final_metric(metrics, "cumulative_cost_gb"),
-        "baseline_per_round_cost_gb": per_round_cost(metrics, mode="paper"),
-        "communication_per_round_cost_gb": per_round_cost(metrics, mode="effective"),
-        "baseline_cost_to_target_gb": cost_to_target(metrics, target_accuracy, mode="paper"),
-        "communication_cost_to_target_gb": cost_to_target(metrics, target_accuracy, mode="effective"),
+        "final_baseline_cost_gb": final_metric(metrics, "baseline_cumulative_cost_gb")
+        or final_metric(metrics, "cumulative_cost_gb"),
+        "final_communication_cost_gb": final_metric(metrics, "communication_cumulative_cost_gb")
+        or final_metric(metrics, "cumulative_cost_gb"),
+        "baseline_per_round_cost_gb": per_round_cost(metrics, mode="baseline"),
+        "communication_per_round_cost_gb": per_round_cost(metrics, mode="communication"),
+        "baseline_cost_to_target_gb": cost_to_target(metrics, target_accuracy, mode="baseline"),
+        "communication_cost_to_target_gb": cost_to_target(metrics, target_accuracy, mode="communication"),
         "rounds_to_target": round_to_target(metrics, target_accuracy),
-        "paper_accuracy_at_common_budget": (
-            accuracy_at_budget(metrics, common_budgets["paper"], mode="paper")
-            if "paper" in common_budgets
+        "baseline_accuracy_at_common_budget": (
+            accuracy_at_budget(metrics, common_budgets["baseline"], mode="baseline")
+            if "baseline" in common_budgets
             else None
         ),
         "communication_accuracy_at_common_budget": (
-            accuracy_at_budget(metrics, common_budgets["effective"], mode="effective")
-            if "effective" in common_budgets
+            accuracy_at_budget(metrics, common_budgets["communication"], mode="communication")
+            if "communication" in common_budgets
             else None
         ),
         "total_model_payload_bytes": int(sum(metrics.get("model_payload_bytes", []))),
@@ -231,8 +238,8 @@ def build_strategy_summary(
         summary["cost_savings_gb"] = None
         summary["cost_savings_pct"] = None
     if compare_accuracy is not None:
-        summary["communication_cost_to_reference_accuracy_gb"] = cost_to_target(metrics, compare_accuracy, mode="effective")
-        summary["baseline_cost_to_reference_accuracy_gb"] = cost_to_target(metrics, compare_accuracy, mode="paper")
+        summary["communication_cost_to_reference_accuracy_gb"] = cost_to_target(metrics, compare_accuracy, mode="communication")
+        summary["baseline_cost_to_reference_accuracy_gb"] = cost_to_target(metrics, compare_accuracy, mode="baseline")
     else:
         summary["communication_cost_to_reference_accuracy_gb"] = None
         summary["baseline_cost_to_reference_accuracy_gb"] = None
@@ -278,21 +285,22 @@ def build_comparison_payload(
     strategy_names: list[str],
     strategy_dirs: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    paper_common_budget, paper_summary = build_mode_summary(
+    baseline_common_budget, baseline_summary = build_mode_summary(
         all_results,
-        mode="paper",
+        mode="baseline",
         target_accuracy=args.target_accuracy,
         budget_gb=getattr(args, "budget_gb", None),
     )
-    effective_common_budget, effective_summary = build_mode_summary(
+    communication_common_budget, communication_summary = build_mode_summary(
         all_results,
-        mode="effective",
+        mode="communication",
         target_accuracy=args.target_accuracy,
         budget_gb=getattr(args, "budget_gb", None),
     )
-    comparison_mode = getattr(args, "comparison_mode", "effective")
-    selected_common_budget = effective_common_budget if comparison_mode == "effective" else paper_common_budget
-    selected_summary = effective_summary if comparison_mode == "effective" else paper_summary
+    comparison_mode = getattr(args, "comparison_mode", "communication")
+    use_communication = comparison_mode == "communication"
+    selected_common_budget = communication_common_budget if use_communication else baseline_common_budget
+    selected_summary = communication_summary if use_communication else baseline_summary
 
     reference_accuracy = None
     if "shapefl" in all_results:
@@ -305,7 +313,10 @@ def build_comparison_payload(
             result["metrics"],
             elapsed_seconds=result["elapsed_seconds"],
             target_accuracy=args.target_accuracy,
-            common_budgets={"paper": paper_common_budget, "effective": effective_common_budget},
+            common_budgets={
+                "baseline": baseline_common_budget,
+                "communication": communication_common_budget,
+            },
             compare_accuracy=reference_accuracy,
         )
 
@@ -315,11 +326,11 @@ def build_comparison_payload(
         "strategy_names": list(strategy_names),
         "strategy_dirs": dict(strategy_dirs or {}),
         "common_budget_gb": selected_common_budget,
-        "paper_common_budget_gb": paper_common_budget,
-        "communication_common_budget_gb": effective_common_budget,
+        "baseline_common_budget_gb": baseline_common_budget,
+        "communication_common_budget_gb": communication_common_budget,
         "summary": selected_summary,
-        "paper_summary": paper_summary,
-        "effective_summary": effective_summary,
+        "baseline_summary": baseline_summary,
+        "communication_summary": communication_summary,
         "strategy_summaries": strategy_summaries,
         "reference_accuracy": reference_accuracy,
         "per_round_metrics": {name: result["metrics"] for name, result in all_results.items()},
