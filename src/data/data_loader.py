@@ -17,6 +17,7 @@ Supported datasets:
 
 import os
 import json
+import warnings
 import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader, Subset
@@ -265,24 +266,62 @@ def create_non_iid_partitions(
 
     partitions = {n: [] for n in range(num_nodes)}
 
+    wanted_per_class = max(1, shards_per_node // max(classes_per_node, 1))
+    short_nodes = []
+
+    total_supply = sum(len(class_shards[c]) for c in range(num_classes))
+    total_demand = num_nodes * shards_per_node
+    balanced_selection = total_supply < 2.0 * max(total_demand, 1)
+
     for node_id in range(num_nodes):
-        available_classes = [c for c in range(num_classes) if len(class_shards[c]) > 0]
-        if len(available_classes) < classes_per_node:
-            selected_classes = available_classes
-        else:
-            selected_classes = _rng.choice(
-                available_classes, classes_per_node, replace=False
+        non_empty = [c for c in range(num_classes) if len(class_shards[c]) > 0]
+        sufficient = [c for c in non_empty if len(class_shards[c]) >= wanted_per_class]
+        pool = sufficient if len(sufficient) >= classes_per_node else non_empty
+
+        if not pool:
+            raise RuntimeError(
+                f"create_non_iid_partitions: shard pool exhausted at node {node_id} of "
+                f"{num_nodes}. This configuration demands {total_demand} shards "
+                f"({num_nodes} nodes x {shards_per_node}) but the dataset supplies only "
+                f"{total_supply} ({num_classes} classes x ~{total_supply // max(num_classes, 1)} "
+                f"shards of size {shard_size}). Maximum supportable nodes is about "
+                f"{total_supply // max(shards_per_node, 1)}. "
+                f"Reduce --num-nodes or --shards-per-node, or raise --shard-size."
             )
+
+        if len(pool) < classes_per_node:
+            selected_classes = pool
+        elif balanced_selection:
+            selected_classes = sorted(
+                pool, key=lambda c: (-len(class_shards[c]), _rng.random())
+            )[:classes_per_node]
+        else:
+            selected_classes = _rng.choice(pool, classes_per_node, replace=False)
 
         shards_per_class = shards_per_node // len(selected_classes)
         extra_shards = shards_per_node % len(selected_classes)
 
+        granted = 0
         for i, c in enumerate(selected_classes):
             n_shards = shards_per_class + (1 if i < extra_shards else 0)
             for _ in range(n_shards):
                 if len(class_shards[c]) > 0:
                     shard = class_shards[c].pop()
                     partitions[node_id].extend(shard)
+                    granted += 1
+        if granted < shards_per_node:
+            short_nodes.append((node_id, granted))
+
+    if short_nodes:
+        worst = min(g for _, g in short_nodes)
+        warnings.warn(
+            f"create_non_iid_partitions: {len(short_nodes)}/{num_nodes} nodes received "
+            f"fewer than the requested {shards_per_node} shards (worst: {worst}, "
+            f"{worst / shards_per_node:.0%} of target). Shard supply is insufficient for "
+            f"this configuration, so later nodes are systematically starved and will be "
+            f"under-weighted during aggregation. Reduce --num-nodes or --shards-per-node.",
+            stacklevel=2,
+        )
 
     print("\nPartition Statistics:")
     for node_id in range(num_nodes):

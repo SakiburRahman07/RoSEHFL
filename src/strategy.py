@@ -338,16 +338,34 @@ class _FlowerStrategyBase(fl.server.strategy.Strategy):
         """Hook: strategy-specific artifact files written between metrics and status."""
         return None
 
+    def _should_write_checkpoint(self, completed: bool) -> bool:
+        """Throttle full-checkpoint writes for large models.
+        """
+        if completed:
+            return True
+        try:
+            interval = int(os.environ.get("ROSEHFL_CHECKPOINT_EVERY", "1"))
+        except ValueError:
+            interval = 1
+        if interval <= 1:
+            return True
+        self._persist_call_count = getattr(self, "_persist_call_count", 0) + 1
+
+        if self._persist_call_count == 1:
+            return True
+        return self._persist_call_count % interval == 0
+
     def _persist_artifacts(self, completed: bool = False) -> None:
         if not self.output_dir:
             return
         save_json(self._serialise_metrics(), os.path.join(self.output_dir, "metrics.json"))
         self._persist_extra_artifacts()
         save_json(self._status_payload(completed), os.path.join(self.output_dir, "status.json"))
-        atomic_write_bytes(
-            os.path.join(self.output_dir, "checkpoint.pkl"),
-            pickle.dumps(self.get_checkpoint_state()),
-        )
+        if self._should_write_checkpoint(completed):
+            atomic_write_bytes(
+                os.path.join(self.output_dir, "checkpoint.pkl"),
+                pickle.dumps(self.get_checkpoint_state()),
+            )
         try:
             from .utils.visualization import generate_live_dashboard
             generate_live_dashboard(self.metrics_history, self.output_dir)
