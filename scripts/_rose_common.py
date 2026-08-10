@@ -71,7 +71,8 @@ def prepare_shared_context(
 
     ds_info = DATASET_INFO[dataset_name]
     server_device = "cuda" if torch.cuda.is_available() else "cpu"
-    client_device = "cpu"
+    client_device = resolve_client_device()
+    print(f"[devices] server={server_device} client={client_device}")
 
     model = get_model(
         model_name,
@@ -190,9 +191,37 @@ def run_strategy(
         num_clients=num_clients,
         config=fl.server.ServerConfig(num_rounds=num_rounds),
         strategy=strategy,
-        client_resources={"num_cpus": 1},
+        client_resources=_client_resources(),
     )
     return time.time() - start
+
+
+def resolve_client_device() -> str:
+    """Device simulated clients train on.
+    """
+    requested = (os.environ.get("ROSEHFL_CLIENT_DEVICE") or "").strip().lower()
+    if not requested:
+        return "cuda" if torch.cuda.is_available() else "cpu"
+    if requested.startswith("cuda") and not torch.cuda.is_available():
+        print(
+            f"[devices] ROSEHFL_CLIENT_DEVICE={requested!r} requested but no CUDA "
+            "device is visible; falling back to cpu"
+        )
+        return "cpu"
+    return requested
+
+
+def _client_resources() -> Dict[str, float]:
+    """Ray resources per simulated client.
+    1 CPU is the default, and 0.5 GPU is the default if a CUDA device is visible.
+    """
+    resources: Dict[str, float] = {
+        "num_cpus": float(os.environ.get("ROSEHFL_CLIENT_CPUS", "1")),
+    }
+    if resolve_client_device().startswith("cuda"):
+        resources["num_gpus"] = float(os.environ.get("ROSEHFL_CLIENT_GPUS", "0.5"))
+    print(f"[ray] client_resources={resources}")
+    return resources
 
 
 def write_fairness_report(
