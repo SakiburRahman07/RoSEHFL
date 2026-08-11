@@ -1441,6 +1441,8 @@ class FedProxFlatStrategy(FedAvgFlatStrategy):
         total_local_epochs: Optional[int] = None,
         initial_parameters: Parameters = None,
         evaluate_fn: Optional[Callable] = None,
+        target_accuracy: Optional[float] = None,
+        min_fit_clients: Optional[int] = None,
     ):
         super().__init__(
             num_nodes=num_nodes,
@@ -1452,6 +1454,8 @@ class FedProxFlatStrategy(FedAvgFlatStrategy):
             total_local_epochs=total_local_epochs,
             initial_parameters=initial_parameters,
             evaluate_fn=evaluate_fn,
+            target_accuracy=target_accuracy,
+            min_fit_clients=min_fit_clients,
         )
 
 

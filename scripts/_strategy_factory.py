@@ -215,6 +215,12 @@ def build_strategy(name: str, args, shared, output_dir: str):
             initial_parameters=shared["initial_parameters"],
             evaluate_fn=shared["evaluate_fn"],
             target_accuracy=_arg(args, "target_accuracy", None),
+            probe_loader=shared["probe_loader"],
+            model_factory=shared["model_factory"],
+            server_device=shared["server_device"],
+            shapley_T=_arg(args, "shapley_T", 4),
+            shapley_K=_arg(args, "shapley_K", 6),
+            seed=args.seed,
         )
         c_ec, model_size_bytes = _flat_strategy_comm_costs(args, shared)
         strategy.set_comm_costs(c_ec, model_size_bytes=model_size_bytes)
